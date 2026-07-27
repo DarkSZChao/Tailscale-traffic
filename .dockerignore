@@ -1,0 +1,8 @@
+.git
+.idea
+.env
+data
+__pycache__
+*.py[cod]
+.pytest_cache
+

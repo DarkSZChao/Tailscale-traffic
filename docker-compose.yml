@@ -1,0 +1,21 @@
+services:
+  tailscale-traffic:
+    build: .
+    container_name: tailscale-traffic
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    environment:
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?请先在 .env 中设置 DASHBOARD_PASSWORD}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      MONTHLY_QUOTA_GB: ${MONTHLY_QUOTA_GB:-3000}
+      COLLECT_INTERVAL: ${COLLECT_INTERVAL:-10}
+      TAILSCALE_INTERFACE: ${TAILSCALE_INTERFACE:-tailscale0}
+      TAILSCALE_SOCKET: /var/run/tailscale/tailscaled.sock
+      DATABASE_PATH: /data/traffic.db
+      TZ: ${TZ:-America/Los_Angeles}
+      PORT: "4658"
+    volumes:
+      - ./data:/data
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock

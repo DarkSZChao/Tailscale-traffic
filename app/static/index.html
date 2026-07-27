@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0c1110">
+  <title>Tailscale 流量控制面板</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar">
+      <a class="brand" href="#overview" aria-label="Tailscale 流量控制面板首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>Tailscale<br>流量控制面板</span>
+      </a>
+
+      <nav class="sidebar-nav" aria-label="主导航">
+        <a class="nav-item" href="#overview" data-page="overview">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg>
+          <span>概览</span>
+        </a>
+        <a class="nav-item" href="#users" data-page="users">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM8 13a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm8 0c-2.67 0-8 1.34-8 4v3h12v-3c0-2.66-2.67-4-4-4ZM8 15c-3.11 0-6 1.56-6 4v1h3v-3c0-.73.2-1.39.56-1.98A9.5 9.5 0 0 0 8 15Z"/></svg>
+          <span>出口控制</span>
+        </a>
+        <a class="nav-item" href="#rules" data-page="rules">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2ZM8.5 17H7v-5h1.5v5Zm4.25 0h-1.5V7h1.5v10ZM17 17h-1.5v-8H17v8Z"/></svg>
+          <span>限额规则</span>
+        </a>
+        <a class="nav-item" href="#system" data-page="system">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.43 12.98c.04-.32.07-.65.07-.98s-.03-.66-.08-.98l2.11-1.65-2-3.46-2.49 1a7.7 7.7 0 0 0-1.69-.98L15 3.27h-4l-.4 2.65c-.61.25-1.17.59-1.69.98l-2.49-1-2 3.46 2.11 1.66c-.04.32-.08.66-.08.98s.03.66.08.98l-2.11 1.65 2 3.46 2.49-1c.52.4 1.08.73 1.69.98l.4 2.66h4l.4-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1 2-3.46-2.15-1.66ZM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg>
+          <span>系统状态</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <span id="collectorStatus" class="status-pill">
+          <span class="status-dot"></span>
+          正在连接
+        </span>
+        <span id="lastCollect" class="last-updated">—</span>
+        <button id="logoutButton" class="logout-button" type="button">退出登录</button>
+      </div>
+    </aside>
+
+    <div class="shell">
+      <header class="page-header">
+        <div>
+          <p id="pageEyebrow" class="eyebrow">EXIT NODE / OVERVIEW</p>
+          <h1 id="pageTitle">流量概览</h1>
+          <p id="pageDescription" class="intro-copy">查看当月总流量、来源构成与每日趋势。</p>
+        </div>
+        <div id="monthControl" class="month-control">
+          <span>统计月份</span>
+          <div class="month-control-row">
+            <button id="resetMonth" type="button" hidden>回到本月</button>
+            <input id="monthPicker" type="month" aria-label="选择统计月份">
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <div class="page-view" data-page-view="overview">
+          <section class="overview" aria-label="流量概览">
+            <article class="total-panel">
+              <p class="metric-label">本月已用</p>
+              <div class="total-row">
+                <strong id="totalUsage">—</strong>
+                <span id="usagePercent">—</span>
+              </div>
+              <div class="quota-track" aria-label="月度额度使用进度">
+                <span id="quotaProgress"></span>
+              </div>
+              <div class="quota-legend">
+                <span>剩余 <b id="remainingUsage">—</b></span>
+                <span>额度 <b id="quotaUsage">—</b></span>
+              </div>
+            </article>
+
+            <article class="split-panel">
+              <div class="split-metric">
+                <span class="direction download">↓</span>
+                <div>
+                  <p>下载</p>
+                  <strong id="downloadUsage">—</strong>
+                </div>
+              </div>
+              <div class="split-metric">
+                <span class="direction upload">↑</span>
+                <div>
+                  <p>上传</p>
+                  <strong id="uploadUsage">—</strong>
+                </div>
+              </div>
+              <div class="scope-breakdown" aria-label="流量来源">
+                <span><i class="scope-dot tailnet"></i>本 Tailnet <b id="tailnetUsage">—</b></span>
+                <span><i class="scope-dot external"></i>外部分享 <b id="externalUsage">—</b></span>
+                <span id="unknownScopeUsage" hidden><i class="scope-dot unknown"></i>未识别 <b>—</b></span>
+              </div>
+              <div class="forecast">
+                <span>月底预计</span>
+                <b id="forecastUsage">—</b>
+              </div>
+            </article>
+          </section>
+
+          <section class="chart-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">DAILY FLOW</p>
+                <h2>每日趋势</h2>
+              </div>
+              <div class="legend" aria-label="图表图例">
+                <span><i class="legend-download"></i>下载</span>
+                <span><i class="legend-upload"></i>上传</span>
+              </div>
+            </div>
+            <div class="chart-wrap">
+              <canvas id="usageChart" role="img" aria-label="每日上传和下载流量柱状图"></canvas>
+              <div id="chartTooltip" class="chart-tooltip" hidden></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="page-view" data-page-view="users" hidden>
+          <section class="users-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">EXIT ACCESS / DEVICES</p>
+                <h2>出口使用者</h2>
+              </div>
+              <span id="userCount" class="count-label">—</span>
+            </div>
+            <div id="usersList" class="exit-users-list">
+              <div class="loading-row">正在读取用户与设备用量…</div>
+            </div>
+            <div id="emptyState" class="empty-state" hidden>
+              <b>这个月还没有出口流量</b>
+              <span>设备开始使用此出口节点后，记录会自动出现在这里。</span>
+            </div>
+          </section>
+        </div>
+
+        <div class="page-view" data-page-view="rules" hidden>
+          <section class="rules-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">MONTHLY LIMITS</p>
+                <h2>已配置规则</h2>
+              </div>
+              <span id="rulesCount" class="count-label">—</span>
+            </div>
+            <div id="rulesList" class="rules-list"></div>
+            <div id="rulesEmpty" class="rules-empty" hidden>
+              <span class="empty-icon" aria-hidden="true">＋</span>
+              <b>还没有设置流量规则</b>
+              <span>前往“出口控制”页面，为用户或设备添加每月流量上限。</span>
+              <a href="#users">前往出口控制</a>
+            </div>
+          </section>
+        </div>
+
+        <div class="page-view" data-page-view="system" hidden>
+          <section class="system-section">
+            <div class="system-grid">
+              <article class="system-card">
+                <span>采集模式</span>
+                <strong id="systemCollectorMode">—</strong>
+                <small>当前流量识别方式</small>
+              </article>
+              <article class="system-card">
+                <span>规则执行</span>
+                <strong id="systemEnforcement">—</strong>
+                <small>是否支持自动封锁设备</small>
+              </article>
+              <article class="system-card">
+                <span>采集间隔</span>
+                <strong id="systemInterval">—</strong>
+                <small>后台刷新计数器频率</small>
+              </article>
+              <article class="system-card">
+                <span>最近采集</span>
+                <strong id="systemLastCollect">—</strong>
+                <small>最后一次写入流量数据</small>
+              </article>
+              <article class="system-card">
+                <span>VPS 月度额度</span>
+                <strong id="systemQuota">—</strong>
+                <small>所有使用者共享的总额度</small>
+              </article>
+              <article class="system-card">
+                <span>数据存储</span>
+                <strong>SQLite</strong>
+                <small>数据仅保存在当前主机</small>
+              </article>
+            </div>
+            <div class="privacy-note">
+              <span class="privacy-mark" aria-hidden="true">✓</span>
+              <div>
+                <b>隐私优先</b>
+                <span>面板只保存各设备的上传、下载字节数，不记录访问内容和目标地址。</span>
+              </div>
+            </div>
+          </section>
+        </div>
+
+      </main>
+    </div>
+  </div>
+
+  <dialog id="userDialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-header">
+        <div>
+          <p class="section-kicker">IDENTITY</p>
+          <h2 id="dialogTitle">账号详情</h2>
+        </div>
+        <button class="close-button" value="cancel" aria-label="关闭">×</button>
+      </div>
+      <label class="alias-field">
+        <span>备注名</span>
+        <div>
+          <input id="aliasInput" maxlength="80" placeholder="例如：小林">
+          <button id="saveAlias" type="button">保存</button>
+        </div>
+      </label>
+    </form>
+  </dialog>
+
+  <dialog id="policyDialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-header">
+        <div>
+          <p class="section-kicker">MONTHLY TRAFFIC RULE</p>
+          <h2 id="policyTitle">流量限额</h2>
+        </div>
+        <button class="close-button" value="cancel" aria-label="关闭限额设置">×</button>
+      </div>
+      <div class="policy-current">
+        <span>本月已用</span>
+        <strong id="policyUsage">—</strong>
+        <small id="policyStatus">尚未设置规则</small>
+      </div>
+      <label class="policy-limit-field">
+        <span>每月流量上限</span>
+        <div>
+          <input id="policyLimitValue" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="例如：1">
+          <select id="policyLimitUnit" aria-label="流量上限单位">
+            <option value="GB">GB</option>
+            <option value="TB">TB</option>
+          </select>
+        </div>
+      </label>
+      <p id="policyEnforcementNote" class="policy-note"></p>
+      <div class="policy-actions">
+        <button id="savePolicy" type="button" class="primary-action">保存规则</button>
+        <button id="unlockPolicy" type="button">本月手动解锁</button>
+        <button id="deletePolicy" type="button" class="danger-action">删除规则</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

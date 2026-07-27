@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0c1110">
+  <title>登录 · Tailscale 流量控制面板</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <div class="login-brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>Tailscale 流量控制面板</span>
+    </div>
+    <section class="login-card">
+      <p class="eyebrow">PRIVATE TRAFFIC LEDGER</p>
+      <h1>欢迎回来。</h1>
+      <p class="login-copy">输入面板密码，查看出口节点本月的流量使用情况。</p>
+      <form id="loginForm" class="login-form">
+        <label for="password">面板密码</label>
+        <div class="password-wrap">
+          <input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            autofocus
+            aria-describedby="loginError"
+          >
+          <button id="loginButton" type="submit">进入</button>
+        </div>
+        <p id="loginError" class="login-error" role="alert"></p>
+      </form>
+      <p class="login-note">会话保存在此浏览器中，修改后台密码会自动使旧会话失效。</p>
+    </section>
+  </main>
+  <script src="/static/login.js" defer></script>
+</body>
+</html>
