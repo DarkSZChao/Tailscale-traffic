@@ -3,10 +3,7 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import json
-import os
 import socket
-import subprocess
-import sys
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
@@ -25,6 +22,7 @@ class Peer:
     os_name: str
     online: bool
     network_scope: str = "tailnet"
+    expired: bool = False
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -91,6 +89,8 @@ class TailscaleClient:
             devices.append(("self", status["Self"]))
 
         for device_id, raw in devices:
+            if raw.get("InNetworkMap") is False:
+                continue
             user_id = str(raw.get("UserID") or "")
             user = users.get(user_id) or {}
             login_name = str(user.get("LoginName") or "")
@@ -107,6 +107,9 @@ class TailscaleClient:
                 f"user:{user_id}"
                 if user_id and user_id != "0"
                 else f"device:{device_id}"
+            )
+            network_scope = (
+                "external" if bool(raw.get("ShareeNode")) else "tailnet"
             )
 
             for ip_text in raw.get("TailscaleIPs") or []:
@@ -126,23 +129,14 @@ class TailscaleClient:
                         dns_name=str(raw.get("DNSName") or ""),
                         os_name=str(raw.get("OS") or ""),
                         online=bool(raw.get("Online")),
-                        network_scope="tailnet",
+                        network_scope=network_scope,
+                        expired=bool(raw.get("Expired")),
                     )
                 )
         return result
 
     def peers(self) -> list[Peer]:
         return self.peers_from_status(self.status())
-
-    @staticmethod
-    def local_ips_from_status(status: dict[str, Any]) -> frozenset[str]:
-        addresses = []
-        for ip_text in (status.get("Self") or {}).get("TailscaleIPs") or []:
-            try:
-                addresses.append(str(ipaddress.ip_address(ip_text)))
-            except ValueError:
-                continue
-        return frozenset(addresses)
 
     def whois(self, ip_text: str) -> Peer:
         ip = ipaddress.ip_address(ip_text)
@@ -187,47 +181,5 @@ class TailscaleClient:
             os_name=str(hostinfo.get("OS") or ""),
             online=True,
             network_scope="external",
+            expired=bool(node.get("Expired")),
         )
-
-
-class TailscaleCliClient(TailscaleClient):
-    """Windows-compatible LocalAPI access through the installed Tailscale CLI."""
-
-    def __init__(self, executable: str = "tailscale"):
-        self.executable = executable
-
-    def _run_json(self, args: list[str]) -> dict[str, Any]:
-        creation_flags = (
-            subprocess.CREATE_NO_WINDOW
-            if sys.platform == "win32"
-            else 0
-        )
-        try:
-            result = subprocess.run(
-                [self.executable, *args],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=10,
-                check=False,
-                creationflags=creation_flags,
-                env=os.environ.copy(),
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(f"无法执行 Tailscale CLI: {exc}") from exc
-        if result.returncode:
-            message = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(f"Tailscale CLI 调用失败: {message}")
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Tailscale CLI 返回了无效的 JSON") from exc
-
-    def status(self) -> dict[str, Any]:
-        return self._run_json(["status", "--json"])
-
-    def whois(self, ip_text: str) -> Peer:
-        ip = ipaddress.ip_address(ip_text)
-        payload = self._run_json(["whois", "--json", str(ip)])
-        return self._peer_from_whois(ip, payload)

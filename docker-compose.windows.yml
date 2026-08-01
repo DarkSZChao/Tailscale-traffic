@@ -1,8 +1,0 @@
-services:
-  tailscale-traffic:
-    network_mode: bridge
-    ports:
-      - "4658:4658"
-    environment:
-      TSM_DEMO: "true"
-      DATABASE_PATH: /data/windows-traffic.db

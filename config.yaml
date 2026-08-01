@@ -1,0 +1,6 @@
+# Tailscale Traffic Monitor
+# 此文件由控制面板“设置”页面管理，也可以在停止容器后手动编辑。
+monthly_quota_gb: 3000.0
+collect_interval: 15
+website_retention_days: 180
+timezone: America/Los_Angeles

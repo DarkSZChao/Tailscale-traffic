@@ -27,11 +27,11 @@
         </a>
         <a class="nav-item" href="#rules" data-page="rules">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2ZM8.5 17H7v-5h1.5v5Zm4.25 0h-1.5V7h1.5v10ZM17 17h-1.5v-8H17v8Z"/></svg>
-          <span>限额规则</span>
+          <span>规则</span>
         </a>
-        <a class="nav-item" href="#system" data-page="system">
+        <a class="nav-item" href="#settings" data-page="settings">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.43 12.98c.04-.32.07-.65.07-.98s-.03-.66-.08-.98l2.11-1.65-2-3.46-2.49 1a7.7 7.7 0 0 0-1.69-.98L15 3.27h-4l-.4 2.65c-.61.25-1.17.59-1.69.98l-2.49-1-2 3.46 2.11 1.66c-.04.32-.08.66-.08.98s.03.66.08.98l-2.11 1.65 2 3.46 2.49-1c.52.4 1.08.73 1.69.98l.4 2.66h4l.4-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1 2-3.46-2.15-1.66ZM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg>
-          <span>系统状态</span>
+          <span>设置</span>
         </a>
       </nav>
 
@@ -49,7 +49,7 @@
       <header class="page-header">
         <div>
           <p id="pageEyebrow" class="eyebrow">EXIT NODE / OVERVIEW</p>
-          <h1 id="pageTitle">流量概览</h1>
+          <h1 id="pageTitle">概览</h1>
           <p id="pageDescription" class="intro-copy">查看当月总流量、来源构成与每日趋势。</p>
         </div>
         <div id="monthControl" class="month-control">
@@ -63,7 +63,7 @@
 
       <main>
         <div class="page-view" data-page-view="overview">
-          <section class="overview" aria-label="流量概览">
+          <section class="overview" aria-label="概览">
             <article class="total-panel">
               <p class="metric-label">本月已用</p>
               <div class="total-row">
@@ -95,8 +95,8 @@
                 </div>
               </div>
               <div class="scope-breakdown" aria-label="流量来源">
-                <span><i class="scope-dot tailnet"></i>本 Tailnet <b id="tailnetUsage">—</b></span>
                 <span><i class="scope-dot external"></i>外部分享 <b id="externalUsage">—</b></span>
+                <span><i class="scope-dot tailnet"></i>本 Tailnet <b id="tailnetUsage">—</b></span>
                 <span id="unknownScopeUsage" hidden><i class="scope-dot unknown"></i>未识别 <b>—</b></span>
               </div>
               <div class="forecast">
@@ -131,7 +131,13 @@
                 <p class="section-kicker">EXIT ACCESS / DEVICES</p>
                 <h2>出口使用者</h2>
               </div>
-              <span id="userCount" class="count-label">—</span>
+              <div class="users-heading-actions">
+                <label class="expired-device-toggle">
+                  <input id="showExpiredDevices" type="checkbox">
+                  <span>显示 Expired 设备</span>
+                </label>
+                <span id="userCount" class="count-label">—</span>
+              </div>
             </div>
             <div id="usersList" class="exit-users-list">
               <div class="loading-row">正在读取用户与设备用量…</div>
@@ -147,7 +153,7 @@
           <section class="rules-section">
             <div class="section-heading">
               <div>
-                <p class="section-kicker">MONTHLY LIMITS</p>
+                <p class="section-kicker">TRAFFIC &amp; ACCESS POLICIES</p>
                 <h2>已配置规则</h2>
               </div>
               <span id="rulesCount" class="count-label">—</span>
@@ -155,54 +161,89 @@
             <div id="rulesList" class="rules-list"></div>
             <div id="rulesEmpty" class="rules-empty" hidden>
               <span class="empty-icon" aria-hidden="true">＋</span>
-              <b>还没有设置流量规则</b>
-              <span>前往“出口控制”页面，为用户或设备添加每月流量上限。</span>
+              <b>还没有设置规则</b>
+              <span>前往“出口控制”页面，为用户或设备设置流量限额、临时封禁或永久封禁。</span>
               <a href="#users">前往出口控制</a>
             </div>
           </section>
         </div>
 
-        <div class="page-view" data-page-view="system" hidden>
-          <section class="system-section">
-            <div class="system-grid">
-              <article class="system-card">
-                <span>采集模式</span>
-                <strong id="systemCollectorMode">—</strong>
-                <small>当前流量识别方式</small>
-              </article>
-              <article class="system-card">
-                <span>规则执行</span>
-                <strong id="systemEnforcement">—</strong>
-                <small>是否支持自动封锁设备</small>
-              </article>
-              <article class="system-card">
-                <span>采集间隔</span>
-                <strong id="systemInterval">—</strong>
-                <small>后台刷新计数器频率</small>
-              </article>
-              <article class="system-card">
-                <span>最近采集</span>
-                <strong id="systemLastCollect">—</strong>
-                <small>最后一次写入流量数据</small>
-              </article>
-              <article class="system-card">
-                <span>VPS 月度额度</span>
-                <strong id="systemQuota">—</strong>
-                <small>所有使用者共享的总额度</small>
-              </article>
-              <article class="system-card">
-                <span>数据存储</span>
-                <strong>SQLite</strong>
-                <small>数据仅保存在当前主机</small>
-              </article>
-            </div>
-            <div class="privacy-note">
-              <span class="privacy-mark" aria-hidden="true">✓</span>
-              <div>
-                <b>隐私优先</b>
-                <span>面板只保存各设备的上传、下载字节数，不记录访问内容和目标地址。</span>
+        <div class="page-view" data-page-view="settings" hidden>
+          <section class="settings-section">
+            <form id="configForm" class="settings-panel">
+              <div class="settings-panel-heading">
+                <div>
+                  <p class="section-kicker">RUNTIME CONFIG</p>
+                  <h2>运行配置</h2>
+                  <p class="settings-file-path">./config.yaml</p>
+                </div>
+                <button id="saveSettings" type="submit">保存到 YAML</button>
               </div>
-            </div>
+              <div class="settings-fields">
+                <label>
+                  <span>VPS 月度总额度 <code>monthly_quota_gb</code></span>
+                  <div class="settings-input-unit">
+                    <input id="settingQuota" type="number" min="0" step="1" required>
+                    <em>GB</em>
+                  </div>
+                  <small>设为 0 时不显示总额度进度。</small>
+                </label>
+                <label>
+                  <span>采集间隔 <code>collect_interval</code></span>
+                  <div class="settings-input-unit">
+                    <input id="settingInterval" type="number" min="1" max="3600" required>
+                    <em>秒</em>
+                  </div>
+                  <small>collector 会在下一轮自动应用。</small>
+                </label>
+                <label>
+                  <span>网站明细保留 <code>website_retention_days</code></span>
+                  <div class="settings-input-unit">
+                    <input id="settingRetention" type="number" min="1" max="3650" required>
+                    <em>天</em>
+                  </div>
+                  <small>过期聚合记录每天清理一次。</small>
+                </label>
+                <label>
+                  <span>统计时区 <code>timezone</code></span>
+                  <input id="settingTimezone" list="timezoneOptions" maxlength="100" required>
+                  <datalist id="timezoneOptions">
+                    <option value="Asia/Shanghai">
+                    <option value="America/Los_Angeles">
+                    <option value="America/New_York">
+                    <option value="Europe/London">
+                    <option value="UTC">
+                  </datalist>
+                  <small>使用 IANA 时区名称，决定每日和每月边界。</small>
+                </label>
+              </div>
+              <p id="settingsMessage" class="settings-message"></p>
+            </form>
+
+            <form id="passwordForm" class="settings-panel">
+              <div class="settings-panel-heading">
+                <div>
+                  <p class="section-kicker">SECURITY</p>
+                  <h2>修改面板密码</h2>
+                </div>
+                <button id="changePassword" type="submit">更新密码</button>
+              </div>
+              <div class="password-settings-fields">
+                <label>
+                  <span>当前密码</span>
+                  <input id="currentPassword" type="password" autocomplete="current-password" required>
+                </label>
+                <label>
+                  <span>新密码</span>
+                  <input id="newPassword" type="password" autocomplete="new-password" minlength="8" required>
+                </label>
+                <label>
+                  <span>确认新密码</span>
+                  <input id="confirmNewPassword" type="password" autocomplete="new-password" minlength="8" required>
+                </label>
+              </div>
+              <p id="passwordMessage" class="settings-message">密码哈希和会话密钥只保存在 traffic.db，不会写入 config.yaml。修改后，其他浏览器中的旧登录会话会立即失效。</p>
+            </form>
           </section>
         </div>
 
@@ -229,35 +270,111 @@
     </form>
   </dialog>
 
+  <dialog id="websiteDialog" class="website-dialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-header">
+        <div>
+          <p class="section-kicker">DAILY DESTINATIONS</p>
+          <h2 id="websiteTitle">设备 · 网站访问</h2>
+        </div>
+        <button class="close-button" value="cancel" aria-label="关闭网站详情">×</button>
+      </div>
+      <div class="website-toolbar">
+        <label>
+          <span>统计日期</span>
+          <input id="websiteDay" type="date">
+        </label>
+        <div class="website-summary">
+          <span><small>目标数</small><b id="websiteDestinations">—</b></span>
+          <span><small>访问次数</small><b id="websiteVisits">—</b></span>
+          <span><small>识别流量</small><b id="websiteTraffic">—</b></span>
+        </div>
+      </div>
+      <p id="websiteTrackingNote" class="website-note"></p>
+      <div class="website-list-heading" aria-hidden="true">
+        <span>网站或目标 IP</span>
+        <span>次数</span>
+        <span>下载</span>
+        <span>上传</span>
+        <span>总计</span>
+      </div>
+      <div id="websiteList" class="website-list"></div>
+    </form>
+  </dialog>
+
   <dialog id="policyDialog">
     <form method="dialog" class="dialog-card">
       <div class="dialog-header">
         <div>
-          <p class="section-kicker">MONTHLY TRAFFIC RULE</p>
-          <h2 id="policyTitle">流量限额</h2>
+          <p class="section-kicker">TRAFFIC &amp; ACCESS RULE</p>
+          <h2 id="policyTitle">设置规则</h2>
         </div>
-        <button class="close-button" value="cancel" aria-label="关闭限额设置">×</button>
+        <button class="close-button" value="cancel" aria-label="关闭规则设置">×</button>
       </div>
-      <div class="policy-current">
-        <span>本月已用</span>
-        <strong id="policyUsage">—</strong>
-        <small id="policyStatus">尚未设置规则</small>
-      </div>
-      <label class="policy-limit-field">
-        <span>每月流量上限</span>
-        <div>
-          <input id="policyLimitValue" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="例如：1">
-          <select id="policyLimitUnit" aria-label="流量上限单位">
-            <option value="GB">GB</option>
-            <option value="TB">TB</option>
-          </select>
-        </div>
+
+      <label class="policy-rule-picker">
+        <span>规则类型</span>
+        <select id="policyRuleType">
+          <option value="quota">流量上限封禁</option>
+          <option value="access">手动封禁</option>
+        </select>
       </label>
-      <p id="policyEnforcementNote" class="policy-note"></p>
-      <div class="policy-actions">
-        <button id="savePolicy" type="button" class="primary-action">保存规则</button>
-        <button id="unlockPolicy" type="button">本月手动解锁</button>
-        <button id="deletePolicy" type="button" class="danger-action">删除规则</button>
+
+      <div class="policy-rule-panels">
+        <section class="policy-rule-panel" data-policy-rule-panel="quota">
+          <div class="policy-current">
+            <span>本月已用</span>
+            <strong id="policyUsage">—</strong>
+            <small id="policyStatus">尚未设置规则</small>
+          </div>
+          <label class="policy-limit-field">
+            <span>每月流量上限</span>
+            <div>
+              <input id="policyLimitValue" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="例如：1">
+              <select id="policyLimitUnit" aria-label="流量上限单位">
+                <option value="GB">GB</option>
+                <option value="TB">TB</option>
+              </select>
+            </div>
+          </label>
+          <p id="policyEnforcementNote" class="policy-note"></p>
+          <div class="policy-actions">
+            <button id="savePolicy" type="button" class="primary-action">保存流量上限</button>
+            <button id="unlockPolicy" type="button">本月手动解锁</button>
+            <button id="deletePolicy" type="button" class="danger-action">删除流量上限</button>
+          </div>
+        </section>
+
+        <section class="policy-rule-panel" data-policy-rule-panel="access" hidden>
+          <div class="policy-current">
+            <span>手动封禁</span>
+            <strong id="accessBlockStatus">未启用</strong>
+            <small id="accessBlockHint">选择封禁方式并应用规则</small>
+          </div>
+          <label class="policy-access-permanent-toggle">
+            <input id="accessBlockPermanent" type="checkbox">
+            <span>
+              <b>永久封禁</b>
+              <small>选中后持续封禁，直到手动解除</small>
+            </span>
+          </label>
+          <label id="accessBlockDurationField" class="policy-limit-field">
+            <span>封禁时长</span>
+            <div>
+              <input id="blockDurationValue" type="number" min="1" step="1" inputmode="numeric" value="24" aria-label="临时封禁时长">
+              <select id="blockDurationUnit" aria-label="临时封禁时长单位">
+                <option value="minutes">分钟</option>
+                <option value="hours" selected>小时</option>
+                <option value="days">天</option>
+              </select>
+            </div>
+          </label>
+          <p id="accessBlockNote" class="policy-note"></p>
+          <div class="policy-actions">
+            <button id="saveAccessBlock" type="button" class="primary-action">应用临时封禁</button>
+            <button id="removeAccessBlock" type="button">解除手动封禁</button>
+          </div>
+        </section>
       </div>
     </form>
   </dialog>

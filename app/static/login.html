@@ -16,24 +16,34 @@
     </div>
     <section class="login-card">
       <p class="eyebrow">PRIVATE TRAFFIC LEDGER</p>
-      <h1>欢迎回来。</h1>
-      <p class="login-copy">输入面板密码，查看出口节点本月的流量使用情况。</p>
+      <h1 id="loginTitle">正在检查。</h1>
+      <p id="loginCopy" class="login-copy">正在读取面板初始化状态…</p>
       <form id="loginForm" class="login-form">
-        <label for="password">面板密码</label>
+        <label id="passwordLabel" for="password">面板密码</label>
         <div class="password-wrap">
           <input
             id="password"
             type="password"
             autocomplete="current-password"
+            minlength="8"
             required
             autofocus
             aria-describedby="loginError"
           >
           <button id="loginButton" type="submit">进入</button>
         </div>
+        <div id="confirmGroup" class="login-confirm" hidden>
+          <label for="confirmPassword">确认密码</label>
+          <input
+            id="confirmPassword"
+            type="password"
+            autocomplete="new-password"
+            minlength="8"
+          >
+        </div>
         <p id="loginError" class="login-error" role="alert"></p>
       </form>
-      <p class="login-note">会话保存在此浏览器中，修改后台密码会自动使旧会话失效。</p>
+      <p id="loginNote" class="login-note">会话保存在此浏览器中，修改后台密码会自动使旧会话失效。</p>
     </section>
   </main>
   <script src="/static/login.js" defer></script>
