@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+version=$(date "+%Y.%m.%d-%H.%M")
+current=""
+
+if [ -f VERSION ]; then
+    current=$(tr -d '\r\n' < VERSION)
+fi
+
+if [ "$current" != "$version" ]; then
+    printf "%s\n" "$version" > VERSION
+    git add VERSION
+    echo "Updated VERSION to $version"
+fi

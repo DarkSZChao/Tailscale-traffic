@@ -5,13 +5,17 @@ import unittest
 import ipaddress
 import sqlite3
 import struct
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from app.collector import Collector
 from app.config import AppConfig
-from app.database import Database
+from app.database import (
+    Database,
+    RECENT_RETENTION_BUCKETS,
+    WEBSITE_RECENT_RETENTION_BUCKETS,
+)
 from app.firewall import Counter, Firewall
 from app.tailscale import Peer, TailscaleClient
 from app.website_collector import (
@@ -217,6 +221,102 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(dashboard["summary"]["download"], 0)
         self.assertEqual(len(dashboard["users"]), 1)
 
+    def test_dashboard_includes_recent_24h_usage_for_users_and_devices(self):
+        now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+        address = "100.64.1.22"
+        self.db.sync_peers(
+            [
+                Peer(
+                    ip=address,
+                    family=4,
+                    identity_key="user:recent",
+                    login_name="recent@example.com",
+                    display_name="Recent",
+                    device_id="node-recent",
+                    device_name="phone",
+                    dns_name="",
+                    os_name="ios",
+                    online=True,
+                )
+            ]
+        )
+
+        samples = [
+            (
+                now - timedelta(hours=24, minutes=5),
+                [
+                    Counter(address, 4, "upload", 1, 100),
+                    Counter(address, 4, "download", 1, 200),
+                ],
+            ),
+            (
+                now - timedelta(hours=23, minutes=55),
+                [
+                    Counter(address, 4, "upload", 2, 400),
+                    Counter(address, 4, "download", 2, 600),
+                ],
+            ),
+            (
+                now,
+                [
+                    Counter(address, 4, "upload", 3, 500),
+                    Counter(address, 4, "download", 3, 800),
+                ],
+            ),
+        ]
+        for sample_time, counters in samples:
+            with patch.object(self.db, "_local_now", return_value=sample_time):
+                self.db.record_counters(counters)
+
+        with patch.object(self.db, "_local_now", return_value=now):
+            dashboard = self.db.dashboard("2026-08", 10_000)
+
+        user = dashboard["users"][0]
+        self.assertEqual(dashboard["current_month"], "2026-08")
+        self.assertEqual(user["upload"], 500)
+        self.assertEqual(user["download"], 800)
+        self.assertEqual(user["recent_24h_upload"], 400)
+        self.assertEqual(user["recent_24h_download"], 600)
+        self.assertEqual(user["recent_24h_total"], 1_000)
+        device = user["device_items"][0]
+        self.assertEqual(device["recent_24h_upload"], 400)
+        self.assertEqual(device["recent_24h_download"], 600)
+        self.assertEqual(device["recent_24h_total"], 1_000)
+
+    def test_recent_usage_storage_is_pruned_after_25_hours(self):
+        now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+        address = "100.64.1.23"
+        with patch.object(
+            self.db,
+            "_local_now",
+            return_value=now - timedelta(hours=26),
+        ):
+            self.db.record_counters(
+                [Counter(address, 4, "download", 1, 100)]
+            )
+        with patch.object(self.db, "_local_now", return_value=now):
+            self.db.record_counters(
+                [Counter(address, 4, "download", 2, 200)]
+            )
+            current_bucket = self.db._recent_bucket()
+            retention_cutoff = current_bucket - RECENT_RETENTION_BUCKETS + 1
+
+        with self.db.connect() as database:
+            user_buckets = database.execute(
+                "SELECT bucket FROM usage_recent ORDER BY bucket"
+            ).fetchall()
+            device_buckets = database.execute(
+                "SELECT bucket FROM device_usage_recent ORDER BY bucket"
+            ).fetchall()
+        self.assertTrue(
+            all(row["bucket"] >= retention_cutoff for row in user_buckets)
+        )
+        self.assertEqual([row["bucket"] for row in user_buckets], [current_bucket])
+        self.assertEqual(
+            [row["bucket"] for row in device_buckets],
+            [current_bucket],
+        )
+
     def test_alias_changes_dashboard_name(self):
         self.db.record_counters(
             [Counter("100.64.1.3", 4, "download", 2, 500)]
@@ -251,6 +351,11 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(dashboard["users"]), 1)
         self.assertEqual(dashboard["users"][0]["key"], "user:42")
         self.assertEqual(dashboard["users"][0]["download"], 500)
+        self.assertEqual(dashboard["users"][0]["recent_24h_download"], 500)
+        self.assertEqual(
+            dashboard["users"][0]["device_items"][0]["recent_24h_download"],
+            500,
+        )
 
     def test_devices_merge_ipv4_and_ipv6(self):
         peers = [
@@ -636,6 +741,16 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["upload"], 170)
         self.assertEqual(payload["summary"]["download"], 430)
         self.assertEqual(payload["websites"][0]["destination"], "example.com")
+        recent_payload = self.db.websites_for_device(
+            "node-website",
+            None,
+            recent_24h=True,
+        )
+        self.assertEqual(recent_payload["period"], "24h")
+        self.assertIsNone(recent_payload["day"])
+        self.assertEqual(recent_payload["summary"]["visits"], 2)
+        self.assertEqual(recent_payload["summary"]["upload"], 170)
+        self.assertEqual(recent_payload["summary"]["download"], 430)
 
         self.db.sync_peers(
             [
@@ -671,6 +786,201 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(user_payload["summary"]["visits"], 3)
         self.assertEqual(user_payload["summary"]["upload"], 220)
         self.assertEqual(user_payload["summary"]["download"], 500)
+        recent_user_payload = self.db.websites_for_user(
+            "user:website",
+            None,
+            recent_24h=True,
+        )
+        self.assertEqual(recent_user_payload["summary"]["visits"], 3)
+        self.assertEqual(recent_user_payload["summary"]["upload"], 220)
+        self.assertEqual(recent_user_payload["summary"]["download"], 500)
+
+    def test_recent_website_usage_uses_a_rolling_timezone_free_window(self):
+        now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+        address = "100.64.4.7"
+        self.db.sync_peers(
+            [
+                Peer(
+                    ip=address,
+                    family=4,
+                    identity_key="user:recent-websites",
+                    login_name="recent-websites@example.com",
+                    display_name="Recent Websites",
+                    device_id="node-recent-websites",
+                    device_name="phone",
+                    dns_name="",
+                    os_name="ios",
+                    online=True,
+                    network_scope="external",
+                )
+            ]
+        )
+        first_flow = {
+            "flow_key": "tcp|100.64.4.7|93.184.216.34|50000|443",
+            "device_ip": address,
+            "destination": "example.com",
+        }
+        second_flow = {
+            "flow_key": "tcp|100.64.4.7|93.184.216.35|50001|443",
+            "device_ip": address,
+            "destination": "example.net",
+        }
+        samples = [
+            (
+                now - timedelta(hours=24, minutes=15),
+                [{**first_flow, "upload_bytes": 100, "download_bytes": 200}],
+            ),
+            (
+                now - timedelta(hours=23, minutes=45),
+                [
+                    {**first_flow, "upload_bytes": 150, "download_bytes": 300},
+                    {**second_flow, "upload_bytes": 20, "download_bytes": 40},
+                ],
+            ),
+            (
+                now,
+                [
+                    {**first_flow, "upload_bytes": 200, "download_bytes": 500},
+                    {**second_flow, "upload_bytes": 30, "download_bytes": 60},
+                ],
+            ),
+        ]
+        for sample_time, flows in samples:
+            with patch.object(self.db, "_local_now", return_value=sample_time):
+                self.db.record_website_flows(flows)
+
+        with patch.object(self.db, "_local_now", return_value=now):
+            device_payload = self.db.websites_for_device(
+                "node-recent-websites",
+                None,
+                recent_24h=True,
+            )
+            user_payload = self.db.websites_for_user(
+                "user:recent-websites",
+                None,
+                recent_24h=True,
+            )
+
+        self.assertEqual(device_payload["summary"]["destinations"], 2)
+        self.assertEqual(device_payload["summary"]["visits"], 1)
+        self.assertEqual(device_payload["summary"]["upload"], 130)
+        self.assertEqual(device_payload["summary"]["download"], 360)
+        self.assertEqual(user_payload["summary"], device_payload["summary"])
+        websites = {
+            item["destination"]: item for item in device_payload["websites"]
+        }
+        self.assertEqual(websites["example.com"]["visits"], 0)
+        self.assertEqual(websites["example.com"]["total"], 400)
+        self.assertEqual(websites["example.net"]["visits"], 1)
+        self.assertEqual(websites["example.net"]["total"], 90)
+
+    def test_recent_website_storage_is_pruned_after_25_hours(self):
+        now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+        address = "100.64.4.8"
+        self.db.sync_peers(
+            [
+                Peer(
+                    ip=address,
+                    family=4,
+                    identity_key="user:recent-prune",
+                    login_name="recent-prune@example.com",
+                    display_name="Recent Prune",
+                    device_id="node-recent-prune",
+                    device_name="phone",
+                    dns_name="",
+                    os_name="ios",
+                    online=True,
+                )
+            ]
+        )
+        flow = {
+            "flow_key": "tcp|100.64.4.8|93.184.216.34|50000|443",
+            "device_ip": address,
+            "destination": "example.com",
+        }
+        with patch.object(
+            self.db,
+            "_local_now",
+            return_value=now - timedelta(hours=26),
+        ):
+            self.db.record_website_flows(
+                [{**flow, "upload_bytes": 10, "download_bytes": 20}]
+            )
+        with patch.object(self.db, "_local_now", return_value=now):
+            self.db.record_website_flows(
+                [{**flow, "upload_bytes": 20, "download_bytes": 40}]
+            )
+            current_bucket = self.db._website_recent_bucket()
+            retention_cutoff = (
+                current_bucket - WEBSITE_RECENT_RETENTION_BUCKETS + 1
+            )
+
+        with self.db.connect() as database:
+            buckets = database.execute(
+                "SELECT bucket FROM device_domain_recent ORDER BY bucket"
+            ).fetchall()
+        self.assertTrue(all(row["bucket"] >= retention_cutoff for row in buckets))
+        self.assertEqual([row["bucket"] for row in buckets], [current_bucket])
+
+    def test_blocked_website_flows_update_baseline_without_usage(self):
+        self.db.sync_peers(
+            [
+                Peer(
+                    ip="100.64.4.9",
+                    family=4,
+                    identity_key="user:blocked-website",
+                    login_name="blocked@example.com",
+                    display_name="Blocked",
+                    device_id="node-blocked-website",
+                    device_name="phone",
+                    dns_name="",
+                    os_name="ios",
+                    online=True,
+                    network_scope="external",
+                )
+            ]
+        )
+        flow = {
+            "flow_key": "tcp|100.64.4.9|93.184.216.34|50000|443",
+            "device_ip": "100.64.4.9",
+            "destination": "example.com",
+        }
+        self.db.record_website_flows(
+            [{**flow, "upload_bytes": 100, "download_bytes": 200}],
+            {"100.64.4.9"},
+        )
+        self.db.record_website_flows(
+            [{**flow, "upload_bytes": 150, "download_bytes": 350}],
+            {"100.64.4.9"},
+        )
+        blocked = self.db.websites_for_device(
+            "node-blocked-website",
+            None,
+        )
+        self.assertEqual(blocked["summary"]["total"], 0)
+        blocked_recent = self.db.websites_for_device(
+            "node-blocked-website",
+            None,
+            recent_24h=True,
+        )
+        self.assertEqual(blocked_recent["summary"]["total"], 0)
+
+        self.db.record_website_flows(
+            [{**flow, "upload_bytes": 175, "download_bytes": 400}]
+        )
+        unblocked = self.db.websites_for_device(
+            "node-blocked-website",
+            None,
+        )
+        self.assertEqual(unblocked["summary"]["upload"], 25)
+        self.assertEqual(unblocked["summary"]["download"], 50)
+        unblocked_recent = self.db.websites_for_device(
+            "node-blocked-website",
+            None,
+            recent_24h=True,
+        )
+        self.assertEqual(unblocked_recent["summary"]["upload"], 25)
+        self.assertEqual(unblocked_recent["summary"]["download"], 50)
 
     def test_device_quota_blocks_all_device_addresses_and_can_be_bypassed(self):
         peers = [
@@ -992,6 +1302,87 @@ class FirewallParserTests(unittest.TestCase):
         self.assertTrue(
             any(call[:3] == ["swap", "tsm_block4_next", "tsm_block4"]
                 for call in firewall.ipset_calls)
+        )
+
+    def test_forward_jumps_are_moved_ahead_of_tailscale_accept(self):
+        class FakeFirewall(Firewall):
+            def __init__(self):
+                super().__init__("tailscale0")
+                self.calls = []
+
+            def _run(self, family, args, *, check=True):
+                self.calls.append((family, args, check))
+                stdout = ""
+                if args == ["-t", "filter", "-S", "FORWARD"]:
+                    stdout = "\n".join(
+                        (
+                            "-P FORWARD ACCEPT",
+                            "-A FORWARD -j ts-forward",
+                            "-A FORWARD -o tailscale0 -j TSM_DOWNLOAD",
+                            "-A FORWARD -i tailscale0 -j TSM_UPLOAD",
+                        )
+                    )
+                return type(
+                    "Result",
+                    (),
+                    {"returncode": 0, "stdout": stdout, "stderr": ""},
+                )()
+
+        firewall = FakeFirewall()
+        firewall._ensure_forward_jumps(4)
+        commands = [call[1] for call in firewall.calls]
+        self.assertEqual(
+            commands[-4:],
+            [
+                [
+                    "-t", "filter", "-D", "FORWARD",
+                    "-o", "tailscale0", "-j", "TSM_DOWNLOAD",
+                ],
+                [
+                    "-t", "filter", "-D", "FORWARD",
+                    "-i", "tailscale0", "-j", "TSM_UPLOAD",
+                ],
+                [
+                    "-t", "filter", "-I", "FORWARD", "1",
+                    "-i", "tailscale0", "-j", "TSM_UPLOAD",
+                ],
+                [
+                    "-t", "filter", "-I", "FORWARD", "1",
+                    "-o", "tailscale0", "-j", "TSM_DOWNLOAD",
+                ],
+            ],
+        )
+
+    def test_forward_jumps_are_unchanged_when_order_is_correct(self):
+        class FakeFirewall(Firewall):
+            def __init__(self):
+                super().__init__("tailscale0")
+                self.calls = []
+
+            def _run(self, family, args, *, check=True):
+                self.calls.append(args)
+                return type(
+                    "Result",
+                    (),
+                    {
+                        "returncode": 0,
+                        "stdout": "\n".join(
+                            (
+                                "-P FORWARD ACCEPT",
+                                "-A FORWARD -o tailscale0 -j TSM_DOWNLOAD",
+                                "-A FORWARD -i tailscale0 -j TSM_UPLOAD",
+                                "-A FORWARD -j ts-forward",
+                            )
+                        ),
+                        "stderr": "",
+                    },
+                )()
+
+        firewall = FakeFirewall()
+        firewall._ensure_forward_jumps(4)
+        self.assertEqual(
+            firewall.calls,
+            [["-t", "filter", "-S", "FORWARD"]],
         )
 
 

@@ -263,6 +263,7 @@ async def dashboard(
         config.monthly_quota_bytes,
         show_expired=show_expired,
     )
+    payload["timezone"] = config.timezone
     payload["collector"] = database.collector_status()
     return payload
 
@@ -286,8 +287,13 @@ async def user_devices(
 async def user_websites(
     identity_key: str,
     day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    period: str = Query(default="day", pattern=r"^(day|24h)$"),
 ):
-    payload = database.websites_for_user(identity_key, day)
+    payload = database.websites_for_user(
+        identity_key,
+        day,
+        recent_24h=period == "24h",
+    )
     if payload is None:
         raise HTTPException(status_code=404, detail="用户不存在")
     return payload
@@ -297,8 +303,13 @@ async def user_websites(
 async def device_websites(
     device_id: str,
     day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    period: str = Query(default="day", pattern=r"^(day|24h)$"),
 ):
-    payload = database.websites_for_device(device_id, day)
+    payload = database.websites_for_device(
+        device_id,
+        day,
+        recent_24h=period == "24h",
+    )
     if payload is None:
         raise HTTPException(status_code=404, detail="设备不存在")
     return payload

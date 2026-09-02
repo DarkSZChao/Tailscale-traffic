@@ -24,6 +24,16 @@ from .firewall import Counter
 from .tailscale import Peer
 
 
+RECENT_BUCKET_SECONDS = 5 * 60
+RECENT_BUCKET_COUNT = 24 * 60 * 60 // RECENT_BUCKET_SECONDS
+RECENT_RETENTION_BUCKETS = 25 * 60 * 60 // RECENT_BUCKET_SECONDS
+WEBSITE_RECENT_BUCKET_SECONDS = 15 * 60
+WEBSITE_RECENT_BUCKET_COUNT = 24 * 60 * 60 // WEBSITE_RECENT_BUCKET_SECONDS
+WEBSITE_RECENT_RETENTION_BUCKETS = (
+    25 * 60 * 60 // WEBSITE_RECENT_BUCKET_SECONDS
+)
+
+
 class Database:
     def __init__(self, path: str, config_path: str | None = None):
         self.path = path
@@ -95,6 +105,22 @@ class Database:
                     PRIMARY KEY (day, device_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS usage_recent (
+                    bucket INTEGER NOT NULL,
+                    identity_key TEXT NOT NULL REFERENCES identities(identity_key),
+                    upload_bytes INTEGER NOT NULL DEFAULT 0,
+                    download_bytes INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (bucket, identity_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS device_usage_recent (
+                    bucket INTEGER NOT NULL,
+                    device_id TEXT NOT NULL,
+                    upload_bytes INTEGER NOT NULL DEFAULT 0,
+                    download_bytes INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (bucket, device_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS device_aliases (
                     device_id TEXT PRIMARY KEY,
                     alias TEXT NOT NULL,
@@ -120,6 +146,21 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_device_domain_daily_device_day
                 ON device_domain_daily(device_id, day);
+
+                CREATE TABLE IF NOT EXISTS device_domain_recent (
+                    bucket INTEGER NOT NULL,
+                    device_id TEXT NOT NULL,
+                    domain_id INTEGER NOT NULL REFERENCES domains(domain_id),
+                    visit_count INTEGER NOT NULL DEFAULT 0,
+                    upload_bytes INTEGER NOT NULL DEFAULT 0,
+                    download_bytes INTEGER NOT NULL DEFAULT 0,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    PRIMARY KEY (bucket, device_id, domain_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_device_domain_recent_device_bucket
+                ON device_domain_recent(device_id, bucket);
 
                 CREATE TABLE IF NOT EXISTS website_flow_state (
                     flow_key TEXT PRIMARY KEY,
@@ -252,6 +293,20 @@ class Database:
 
     def _now(self) -> str:
         return self._local_now().isoformat(timespec="seconds")
+
+    def _recent_bucket(self) -> int:
+        return int(self._local_now().timestamp()) // RECENT_BUCKET_SECONDS
+
+    def _recent_cutoff_bucket(self) -> int:
+        return self._recent_bucket() - RECENT_BUCKET_COUNT + 1
+
+    def _website_recent_bucket(self) -> int:
+        return (
+            int(self._local_now().timestamp()) // WEBSITE_RECENT_BUCKET_SECONDS
+        )
+
+    def _website_recent_cutoff_bucket(self) -> int:
+        return self._website_recent_bucket() - WEBSITE_RECENT_BUCKET_COUNT + 1
 
     def get_app_config(self) -> AppConfig:
         config = load_app_config(self.config_path)
@@ -448,6 +503,22 @@ class Database:
                     db.execute(
                         "DELETE FROM usage_daily WHERE identity_key = ?", (old_key,)
                     )
+                    db.execute(
+                        """
+                        INSERT INTO usage_recent
+                            (bucket, identity_key, upload_bytes, download_bytes)
+                        SELECT bucket, ?, upload_bytes, download_bytes
+                        FROM usage_recent WHERE identity_key = ?
+                        ON CONFLICT(bucket, identity_key) DO UPDATE SET
+                            upload_bytes = upload_bytes + excluded.upload_bytes,
+                            download_bytes = download_bytes + excluded.download_bytes
+                        """,
+                        (peer.identity_key, old_key),
+                    )
+                    db.execute(
+                        "DELETE FROM usage_recent WHERE identity_key = ?",
+                        (old_key,),
+                    )
                 if existing and existing["device_id"] != peer.device_id:
                     old_device_id = existing["device_id"]
                     db.execute(
@@ -472,6 +543,22 @@ class Database:
                     )
                     db.execute(
                         """
+                        INSERT INTO device_usage_recent
+                            (bucket, device_id, upload_bytes, download_bytes)
+                        SELECT bucket, ?, upload_bytes, download_bytes
+                        FROM device_usage_recent WHERE device_id = ?
+                        ON CONFLICT(bucket, device_id) DO UPDATE SET
+                            upload_bytes = upload_bytes + excluded.upload_bytes,
+                            download_bytes = download_bytes + excluded.download_bytes
+                        """,
+                        (peer.device_id, old_device_id),
+                    )
+                    db.execute(
+                        "DELETE FROM device_usage_recent WHERE device_id = ?",
+                        (old_device_id,),
+                    )
+                    db.execute(
+                        """
                         INSERT INTO device_domain_daily
                             (day, device_id, domain_id, visit_count,
                              upload_bytes, download_bytes, first_seen, last_seen)
@@ -490,6 +577,28 @@ class Database:
                     )
                     db.execute(
                         "DELETE FROM device_domain_daily WHERE device_id = ?",
+                        (old_device_id,),
+                    )
+                    db.execute(
+                        """
+                        INSERT INTO device_domain_recent
+                            (bucket, device_id, domain_id, visit_count,
+                             upload_bytes, download_bytes, first_seen, last_seen)
+                        SELECT bucket, ?, domain_id, visit_count,
+                               upload_bytes, download_bytes, first_seen, last_seen
+                        FROM device_domain_recent WHERE device_id = ?
+                        ON CONFLICT(bucket, device_id, domain_id) DO UPDATE SET
+                            visit_count = visit_count + excluded.visit_count,
+                            upload_bytes = upload_bytes + excluded.upload_bytes,
+                            download_bytes =
+                                download_bytes + excluded.download_bytes,
+                            first_seen = MIN(first_seen, excluded.first_seen),
+                            last_seen = MAX(last_seen, excluded.last_seen)
+                        """,
+                        (peer.device_id, old_device_id),
+                    )
+                    db.execute(
+                        "DELETE FROM device_domain_recent WHERE device_id = ?",
                         (old_device_id,),
                     )
                     db.execute(
@@ -583,6 +692,7 @@ class Database:
     def record_counters(self, counters: Iterable[Counter]) -> tuple[int, int]:
         today = self._today().isoformat()
         now = self._now()
+        recent_bucket = self._recent_bucket()
         added_upload = 0
         added_download = 0
         with self.connect() as db:
@@ -677,9 +787,40 @@ class Database:
                         download_packets,
                     ),
                 )
+                db.execute(
+                    """
+                    INSERT INTO usage_recent
+                        (bucket, identity_key, upload_bytes, download_bytes)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(bucket, identity_key) DO UPDATE SET
+                        upload_bytes = upload_bytes + excluded.upload_bytes,
+                        download_bytes = download_bytes + excluded.download_bytes
+                    """,
+                    (recent_bucket, identity_key, upload_bytes, download_bytes),
+                )
+                db.execute(
+                    """
+                    INSERT INTO device_usage_recent
+                        (bucket, device_id, upload_bytes, download_bytes)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(bucket, device_id) DO UPDATE SET
+                        upload_bytes = upload_bytes + excluded.upload_bytes,
+                        download_bytes = download_bytes + excluded.download_bytes
+                    """,
+                    (recent_bucket, device_id, upload_bytes, download_bytes),
+                )
                 added_upload += upload_bytes
                 added_download += download_bytes
 
+            retention_cutoff = recent_bucket - RECENT_RETENTION_BUCKETS + 1
+            db.execute(
+                "DELETE FROM usage_recent WHERE bucket < ?",
+                (retention_cutoff,),
+            )
+            db.execute(
+                "DELETE FROM device_usage_recent WHERE bucket < ?",
+                (retention_cutoff,),
+            )
             db.execute(
                 """
                 INSERT INTO meta(key, value) VALUES ('last_collect', ?)
@@ -810,14 +951,21 @@ class Database:
             "accuracy": "best-effort",
         }
 
-    def record_website_flows(self, flows: Iterable[dict]) -> tuple[int, int]:
+    def record_website_flows(
+        self,
+        flows: Iterable[dict],
+        ignored_device_ips: Iterable[str] = (),
+    ) -> tuple[int, int]:
         today = self._today().isoformat()
         now = self._now()
+        recent_bucket = self._website_recent_bucket()
+        ignored = set(ignored_device_ips)
         stale_before = (
             self._local_now() - timedelta(days=2)
         ).isoformat(timespec="seconds")
         added_upload = 0
         added_download = 0
+        recent_updates: dict[tuple[str, int], dict[str, int | str]] = {}
         with self.connect() as db:
             for flow in flows:
                 device = db.execute(
@@ -889,6 +1037,14 @@ class Database:
                         now,
                     ),
                 )
+                # Conntrack accounting happens before the filter/FORWARD
+                # decision, so it also sees packets that our access policy
+                # drops.  Keep the flow baseline current without presenting
+                # blocked attempts as successful website traffic.  Updating
+                # the baseline also prevents those bytes being added after a
+                # later unblock.
+                if flow["device_ip"] in ignored:
+                    continue
                 if not upload_delta and not download_delta and not visit_delta:
                     continue
 
@@ -924,9 +1080,59 @@ class Database:
                         now,
                     ),
                 )
+                recent_key = (device_id, int(domain["domain_id"]))
+                recent = recent_updates.setdefault(
+                    recent_key,
+                    {
+                        "visits": 0,
+                        "upload": 0,
+                        "download": 0,
+                        "first_seen": now,
+                        "last_seen": now,
+                    },
+                )
+                recent["visits"] = int(recent["visits"]) + visit_delta
+                recent["upload"] = int(recent["upload"]) + upload_delta
+                recent["download"] = (
+                    int(recent["download"]) + download_delta
+                )
                 added_upload += upload_delta
                 added_download += download_delta
 
+            db.executemany(
+                """
+                INSERT INTO device_domain_recent
+                    (bucket, device_id, domain_id, visit_count,
+                     upload_bytes, download_bytes, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(bucket, device_id, domain_id) DO UPDATE SET
+                    visit_count = visit_count + excluded.visit_count,
+                    upload_bytes = upload_bytes + excluded.upload_bytes,
+                    download_bytes = download_bytes + excluded.download_bytes,
+                    first_seen = MIN(first_seen, excluded.first_seen),
+                    last_seen = MAX(last_seen, excluded.last_seen)
+                """,
+                (
+                    (
+                        recent_bucket,
+                        device_id,
+                        domain_id,
+                        int(values["visits"]),
+                        int(values["upload"]),
+                        int(values["download"]),
+                        str(values["first_seen"]),
+                        str(values["last_seen"]),
+                    )
+                    for (device_id, domain_id), values in recent_updates.items()
+                ),
+            )
+            recent_retention_cutoff = (
+                recent_bucket - WEBSITE_RECENT_RETENTION_BUCKETS + 1
+            )
+            db.execute(
+                "DELETE FROM device_domain_recent WHERE bucket < ?",
+                (recent_retention_cutoff,),
+            )
             db.execute(
                 "DELETE FROM website_flow_state WHERE updated_at < ?",
                 (stale_before,),
@@ -954,6 +1160,10 @@ class Database:
                 WHERE NOT EXISTS (
                     SELECT 1 FROM device_domain_daily
                     WHERE device_domain_daily.domain_id = domains.domain_id
+                )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM device_domain_recent
+                    WHERE device_domain_recent.domain_id = domains.domain_id
                 )
                 """
             )
@@ -1000,8 +1210,14 @@ class Database:
             },
         }
 
-    def websites_for_device(self, device_id: str, day: str | None) -> dict | None:
-        normalized_day = self._website_day(day)
+    def websites_for_device(
+        self,
+        device_id: str,
+        day: str | None,
+        *,
+        recent_24h: bool = False,
+    ) -> dict | None:
+        normalized_day = None if recent_24h else self._website_day(day)
         with self.connect() as db:
             device = db.execute(
                 """
@@ -1018,18 +1234,38 @@ class Database:
             ).fetchone()
             if not device:
                 return None
-            rows = db.execute(
-                """
-                SELECT d.domain, u.visit_count, u.upload_bytes,
-                       u.download_bytes, u.first_seen, u.last_seen
-                FROM device_domain_daily AS u
-                JOIN domains AS d ON d.domain_id = u.domain_id
-                WHERE u.device_id = ? AND u.day = ?
-                ORDER BY (u.upload_bytes + u.download_bytes) DESC,
-                         u.visit_count DESC, d.domain
-                """,
-                (device_id, normalized_day),
-            ).fetchall()
+            if recent_24h:
+                rows = db.execute(
+                    """
+                    SELECT d.domain,
+                           SUM(u.visit_count) AS visit_count,
+                           SUM(u.upload_bytes) AS upload_bytes,
+                           SUM(u.download_bytes) AS download_bytes,
+                           MIN(u.first_seen) AS first_seen,
+                           MAX(u.last_seen) AS last_seen
+                    FROM device_domain_recent AS u
+                    JOIN domains AS d ON d.domain_id = u.domain_id
+                    WHERE u.device_id = ? AND u.bucket >= ?
+                    GROUP BY u.domain_id, d.domain
+                    ORDER BY
+                        (SUM(u.upload_bytes) + SUM(u.download_bytes)) DESC,
+                        SUM(u.visit_count) DESC, d.domain
+                    """,
+                    (device_id, self._website_recent_cutoff_bucket()),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """
+                    SELECT d.domain, u.visit_count, u.upload_bytes,
+                           u.download_bytes, u.first_seen, u.last_seen
+                    FROM device_domain_daily AS u
+                    JOIN domains AS d ON d.domain_id = u.domain_id
+                    WHERE u.device_id = ? AND u.day = ?
+                    ORDER BY (u.upload_bytes + u.download_bytes) DESC,
+                             u.visit_count DESC, d.domain
+                    """,
+                    (device_id, normalized_day),
+                ).fetchall()
 
         return {
             "device_id": device_id,
@@ -1039,6 +1275,8 @@ class Database:
                 device["ipv4"],
             ),
             "day": normalized_day,
+            "period": "24h" if recent_24h else "day",
+            "timezone": self._timezone_name,
             **self._website_payload(rows),
             "tracking": self.website_status(),
         }
@@ -1047,8 +1285,10 @@ class Database:
         self,
         identity_key: str,
         day: str | None,
+        *,
+        recent_24h: bool = False,
     ) -> dict | None:
-        normalized_day = self._website_day(day)
+        normalized_day = None if recent_24h else self._website_day(day)
         with self.connect() as db:
             user = db.execute(
                 """
@@ -1074,34 +1314,62 @@ class Database:
                 ).fetchone()["total"]
                 or 0
             )
-            rows = db.execute(
-                """
-                SELECT d.domain,
-                       SUM(u.visit_count) AS visit_count,
-                       SUM(u.upload_bytes) AS upload_bytes,
-                       SUM(u.download_bytes) AS download_bytes,
-                       MIN(u.first_seen) AS first_seen,
-                       MAX(u.last_seen) AS last_seen
-                FROM device_domain_daily AS u
-                JOIN domains AS d ON d.domain_id = u.domain_id
-                JOIN (
-                    SELECT DISTINCT device_id
-                    FROM devices
-                    WHERE identity_key = ?
-                ) AS user_devices ON user_devices.device_id = u.device_id
-                WHERE u.day = ?
-                GROUP BY u.domain_id, d.domain
-                ORDER BY (SUM(u.upload_bytes) + SUM(u.download_bytes)) DESC,
-                         SUM(u.visit_count) DESC, d.domain
-                """,
-                (identity_key, normalized_day),
-            ).fetchall()
+            if recent_24h:
+                rows = db.execute(
+                    """
+                    SELECT d.domain,
+                           SUM(u.visit_count) AS visit_count,
+                           SUM(u.upload_bytes) AS upload_bytes,
+                           SUM(u.download_bytes) AS download_bytes,
+                           MIN(u.first_seen) AS first_seen,
+                           MAX(u.last_seen) AS last_seen
+                    FROM device_domain_recent AS u
+                    JOIN domains AS d ON d.domain_id = u.domain_id
+                    JOIN (
+                        SELECT DISTINCT device_id
+                        FROM devices
+                        WHERE identity_key = ?
+                    ) AS user_devices ON user_devices.device_id = u.device_id
+                    WHERE u.bucket >= ?
+                    GROUP BY u.domain_id, d.domain
+                    ORDER BY
+                        (SUM(u.upload_bytes) + SUM(u.download_bytes)) DESC,
+                        SUM(u.visit_count) DESC, d.domain
+                    """,
+                    (identity_key, self._website_recent_cutoff_bucket()),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """
+                    SELECT d.domain,
+                           SUM(u.visit_count) AS visit_count,
+                           SUM(u.upload_bytes) AS upload_bytes,
+                           SUM(u.download_bytes) AS download_bytes,
+                           MIN(u.first_seen) AS first_seen,
+                           MAX(u.last_seen) AS last_seen
+                    FROM device_domain_daily AS u
+                    JOIN domains AS d ON d.domain_id = u.domain_id
+                    JOIN (
+                        SELECT DISTINCT device_id
+                        FROM devices
+                        WHERE identity_key = ?
+                    ) AS user_devices ON user_devices.device_id = u.device_id
+                    WHERE u.day = ?
+                    GROUP BY u.domain_id, d.domain
+                    ORDER BY
+                        (SUM(u.upload_bytes) + SUM(u.download_bytes)) DESC,
+                        SUM(u.visit_count) DESC, d.domain
+                    """,
+                    (identity_key, normalized_day),
+                ).fetchall()
 
         return {
             "identity_key": identity_key,
             "user_name": str(user["name"]),
             "device_count": device_count,
             "day": normalized_day,
+            "period": "24h" if recent_24h else "day",
+            "timezone": self._timezone_name,
             **self._website_payload(rows),
             "tracking": self.website_status(),
         }
@@ -1668,6 +1936,7 @@ class Database:
         show_expired: bool = False,
     ) -> dict:
         start, end, normalized_month = self.month_bounds(month)
+        recent_cutoff = self._recent_cutoff_bucket()
         with self.connect() as db:
             usage_rows = db.execute(
                 """
@@ -1712,6 +1981,24 @@ class Database:
             ).fetchall()
             devices = {row["identity_key"]: dict(row) for row in device_rows}
 
+            recent_rows = db.execute(
+                """
+                SELECT identity_key, SUM(upload_bytes) AS upload,
+                       SUM(download_bytes) AS download
+                FROM usage_recent
+                WHERE bucket >= ?
+                GROUP BY identity_key
+                """,
+                (recent_cutoff,),
+            ).fetchall()
+            recent_usage = {
+                row["identity_key"]: {
+                    "upload": int(row["upload"] or 0),
+                    "download": int(row["download"] or 0),
+                }
+                for row in recent_rows
+            }
+
             daily_raw = db.execute(
                 """
                 SELECT day, SUM(upload_bytes) AS upload,
@@ -1743,6 +2030,9 @@ class Database:
                 else "unknown"
             )
             scope_totals[network_scope] += upload + download
+            recent = recent_usage.get(
+                row["identity_key"], {"upload": 0, "download": 0}
+            )
             users.append(
                 {
                     "key": row["identity_key"],
@@ -1754,6 +2044,9 @@ class Database:
                     "upload": upload,
                     "download": download,
                     "total": upload + download,
+                    "recent_24h_upload": recent["upload"],
+                    "recent_24h_download": recent["download"],
+                    "recent_24h_total": recent["upload"] + recent["download"],
                     "devices": int(device.get("devices") or 0),
                     "online": bool(device.get("online")),
                     "last_seen": device.get("last_seen"),
@@ -1790,6 +2083,7 @@ class Database:
 
         return {
             "month": normalized_month,
+            "current_month": self._today().strftime("%Y-%m"),
             "period": {"start": start.isoformat(), "end": end.isoformat()},
             "summary": {
                 "upload": total_upload,
@@ -1816,6 +2110,7 @@ class Database:
         show_expired: bool = False,
     ) -> list[dict]:
         start, end, _ = self.month_bounds(month)
+        recent_cutoff = self._recent_cutoff_bucket()
         with self.connect() as db:
             rows = db.execute(
                 """
@@ -1850,6 +2145,28 @@ class Database:
                     "download": int(row["download"] or 0),
                 }
                 for row in usage_rows
+            }
+            recent_rows = db.execute(
+                """
+                SELECT device_id, SUM(upload_bytes) AS upload,
+                       SUM(download_bytes) AS download
+                FROM device_usage_recent
+                WHERE bucket >= ?
+                  AND device_id IN (
+                      SELECT DISTINCT device_id
+                      FROM devices
+                      WHERE identity_key = ?
+                  )
+                GROUP BY device_id
+                """,
+                (recent_cutoff, identity_key),
+            ).fetchall()
+            recent_usage = {
+                row["device_id"]: {
+                    "upload": int(row["upload"] or 0),
+                    "download": int(row["download"] or 0),
+                }
+                for row in recent_rows
             }
 
         grouped: dict[str, dict] = {}
@@ -1903,6 +2220,12 @@ class Database:
             device["total"] = (
                 device_usage["upload"] + device_usage["download"]
             )
+            recent = recent_usage.get(
+                device["device_id"], {"upload": 0, "download": 0}
+            )
+            device["recent_24h_upload"] = recent["upload"]
+            device["recent_24h_download"] = recent["download"]
+            device["recent_24h_total"] = recent["upload"] + recent["download"]
             device["policy"] = self.quota_state("device", device["device_id"])
         if not show_expired:
             devices = [

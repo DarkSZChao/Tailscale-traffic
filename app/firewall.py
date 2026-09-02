@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 
@@ -119,33 +120,6 @@ class Firewall:
                     if exists.returncode:
                         raise FirewallError(f"无法创建防火墙计数链 {chain}")
 
-                interface_flag = "-i" if direction == "upload" else "-o"
-                jump = [
-                    "-t",
-                    "filter",
-                    "-C",
-                    "FORWARD",
-                    interface_flag,
-                    self.interface,
-                    "-j",
-                    chain,
-                ]
-                if self._run(family, jump, check=False).returncode:
-                    self._run(
-                        family,
-                        [
-                            "-t",
-                            "filter",
-                            "-I",
-                            "FORWARD",
-                            "1",
-                            interface_flag,
-                            self.interface,
-                            "-j",
-                            chain,
-                        ],
-                    )
-
                 set_direction = "src" if direction == "upload" else "dst"
                 block_rule = [
                     "-t",
@@ -241,6 +215,47 @@ class Firewall:
                             "RETURN",
                         ],
                     )
+
+            self._ensure_forward_jumps(family)
+
+    def _ensure_forward_jumps(self, family: int) -> None:
+        """Keep accounting and blocking ahead of Tailscale's ACCEPT rules.
+
+        tailscaled can rebuild its ``ts-forward`` jump after this process has
+        started.  Merely checking that our jumps exist is insufficient: an
+        earlier ACCEPT in ``ts-forward`` bypasses both accounting and access
+        blocks.  Inspect the ordered rules and only rewrite our two jumps when
+        they are no longer the first interface-specific handlers.
+        """
+        desired = [
+            ["-o", self.interface, "-j", self.CHAINS["download"]],
+            ["-i", self.interface, "-j", self.CHAINS["upload"]],
+        ]
+        result = self._run(family, ["-t", "filter", "-S", "FORWARD"])
+        forward_rules: list[list[str]] = []
+        for line in result.stdout.splitlines():
+            try:
+                parts = shlex.split(line)
+            except ValueError:
+                continue
+            if parts[:2] == ["-A", "FORWARD"]:
+                forward_rules.append(parts[2:])
+        if forward_rules[: len(desired)] == desired:
+            return
+
+        # Delete the exact legacy jumps once, then insert in reverse order at
+        # position one so the final order matches ``desired``.
+        for rule in desired:
+            self._run(
+                family,
+                ["-t", "filter", "-D", "FORWARD", *rule],
+                check=False,
+            )
+        for rule in reversed(desired):
+            self._run(
+                family,
+                ["-t", "filter", "-I", "FORWARD", "1", *rule],
+            )
 
     def counters(self) -> list[Counter]:
         counters: list[Counter] = []

@@ -1,5 +1,6 @@
 .env
 .idea/
+tests/
 data/*.db
 data/*.db-*
 data/*.sqlite
@@ -7,3 +8,5 @@ data/*.sqlite-*
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.agents/
+.codex/

@@ -1,105 +1,105 @@
-# Tailscale 流量控制面板
+# Tailscale Traffic Dashboard
 
-一个部署在 Tailscale Linux 出口节点上的轻量流量面板，按朋友和设备统计上传、下载与每月总用量。
+**English** | [简体中文](README.zh-CN.md)
+
+A lightweight traffic dashboard for a Tailscale Linux exit node. It tracks upload, download, and monthly traffic usage by friend and device.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)
 ![License](https://img.shields.io/badge/License-MIT-c7f36b)
 
-## 为什么需要它
+## Why this project
 
-Tailscale 官方的 [Network flow logs](https://tailscale.com/docs/features/logging/network-flow-logs) 包含出口流量字节计数，但目前只适用于 Premium 和 Enterprise 套餐，而且管理控制台不提供实时用量页面。
+Tailscale's official [Network flow logs](https://tailscale.com/docs/features/logging/network-flow-logs) include byte counts for exit-node traffic, but they are currently available only on the Premium and Enterprise plans, and the admin console does not provide a real-time usage dashboard.
 
-Tailscale 流量控制面板不依赖付费 API。它在 VPS 本机的 Linux 转发链上自动发现并按 Tailscale IP 计数，再通过 `tailscaled` 的 LocalAPI WhoIs 把 IP 映射为账号与设备。即使朋友来自外部 tailnet、没有出现在普通的 `tailscale status` 列表里，也能被识别：
+Tailscale Traffic Dashboard does not depend on paid APIs. It automatically discovers Tailscale IPs and counts their traffic in the VPS's Linux forwarding chains, then maps each IP to an account and device through the `tailscaled` LocalAPI WhoIs endpoint. It can even identify friends from external tailnets whose devices do not appear in the regular `tailscale status` output:
 
-- 分别统计上传和下载；
-- 按账号合并同一朋友的多台设备；
-- 区分本 Tailnet 设备与通过节点分享接入的外部设备；
-- 可为用户总量或单台设备设置月度限额，超限后自动封锁；
-- 按设备和日期聚合访问网站、近似连接次数及上传下载流量；
-- SQLite 按天持久化，面板按自然月汇总；
-- 可设置月流量额度、查看月底预测；
-- 可在面板中给账号设置备注名；
-- 通过出口 DNS、HTTP Host 和 TLS SNI 尽力识别域名；
-- 网站明细只保存按天聚合的域名或目标 IP，不记录 URL、请求内容或单条连接。
+- Track upload and download separately;
+- Group multiple devices belonging to the same friend by account;
+- Distinguish devices in your tailnet from external devices connected through node sharing;
+- Set monthly limits for an entire user or an individual device and automatically block traffic when a limit is reached;
+- Aggregate visited sites, approximate connection counts, uploads, and downloads by device and date;
+- Persist daily data in SQLite and summarize usage by calendar month;
+- Configure a monthly traffic allowance and view a projected end-of-month total;
+- Assign custom account aliases from the dashboard;
+- Make a best-effort attempt to identify domains from exit-node DNS, HTTP Host headers, and TLS SNI;
+- Store only daily aggregates by domain or destination IP for website details, without retaining URLs, request contents, or individual connections.
 
-## 前提
+## Prerequisites
 
-- Linux VPS，Tailscale 已在宿主机运行并配置成出口节点；
-- 使用内核网络模式，存在 `tailscale0` 网卡；
-- Docker Engine 与 Docker Compose v2；
-- 宿主机的 Tailscale socket 路径为 `/var/run/tailscale/tailscaled.sock`；
-- 内核已启用 conntrack 流量计数；
-- 当前出口节点主要用于互联网出口。如果还在同一节点配置了子网路由，经过 `tailscale0` 的子网转发流量也会计入。
+- A Linux VPS with Tailscale running on the host and configured as an exit node;
+- Kernel networking mode with a `tailscale0` interface;
+- Docker Engine and Docker Compose v2;
+- The host's Tailscale socket available at `/var/run/tailscale/tailscaled.sock`;
+- Conntrack traffic accounting enabled in the kernel;
+- An exit node used primarily for internet access. If the same node also advertises subnet routes, subnet traffic forwarded through `tailscale0` will also be counted.
 
-## 部署
+## Deployment
 
 ```bash
-git clone <你的仓库地址>
-cd <仓库目录>
+git clone <your-repository-url>
+cd <repository-directory>
 ```
 
-网站流量明细需要 conntrack 字节计数。首次部署前执行：
+Website traffic details require conntrack byte accounting. Before the first deployment, run:
 
 ```bash
 sudo sysctl -w net.netfilter.nf_conntrack_acct=1
 ```
 
-要在 VPS 重启后继续生效，将下面内容写入
-`/etc/sysctl.d/99-tailscale-traffic.conf`：
+To preserve the setting after the VPS restarts, add the following to
+`/etc/sysctl.d/99-tailscale-traffic.conf`:
 
 ```text
 net.netfilter.nf_conntrack_acct=1
 ```
 
-完成配置后启动：
+Then start the services:
 
 ```bash
 docker compose up -d --build
 ```
 
-如果从旧的单容器版本升级，首次切换需要移除旧容器，数据目录不会被删除：
+When upgrading from the older single-container version, remove the old container during the first migration. The data directory will not be deleted:
 
 ```bash
 docker compose down --remove-orphans
 docker compose up -d --build
 ```
 
-Compose 会启动两个相互独立的容器：
+Compose starts two independent containers:
 
-- `collector` 长期运行，负责流量采集和限额封锁；
-- `dashboard` 提供控制面板，可以独立更新和重启。
+- `collector` runs continuously and handles traffic collection and quota enforcement;
+- `dashboard` serves the control panel and can be updated or restarted independently.
 
-dashboard 容器内部监听 8000，并映射到宿主机所有地址的 **4656** 端口。
-请使用防火墙限制为仅允许可信来源访问：
+The dashboard container listens on port 8000 internally and is published on port **4656** on all host addresses.
+Use a firewall to restrict access to trusted sources:
 
 ```text
-http://你的VPS的Tailscale-IP:4656
+http://<your-VPS-Tailscale-IP>:4656
 ```
 
-例如使用 UFW 只允许从 Tailscale 接口访问：
+For example, use UFW to allow access only through the Tailscale interface:
 
 ```bash
 sudo ufw allow in on tailscale0 to any port 4656 proto tcp
 ```
 
-首次打开面板时会要求设置密码，不需要用户名，也不再使用 `.env`。
-密码只以安全哈希保存在 `traffic.db` 中。之后可以在“设置”页面修改密码；
-修改后其他浏览器中的旧会话会自动失效。
+The first time you open the dashboard, you will be prompted to set a password. No username is required, and `.env` is no longer used.
+Only a secure password hash is stored in `traffic.db`. You can later change the password on the Settings page; doing so automatically invalidates sessions in other browsers.
 
-不要把未加 TLS 的 4656 端口直接开放到公网；普通 HTTP 不会加密登录时
-提交的密码。通过 Tailscale IP 访问时，链路由 Tailscale 加密。
+Do not expose the unencrypted port 4656 directly to the public internet. Plain HTTP does not encrypt the password submitted during login. When you access the dashboard through a Tailscale IP, the connection is encrypted by Tailscale.
 
-## 查看状态
+## Checking status
 
 ```bash
 docker compose ps
 docker compose logs -f --tail=100
 ```
 
-正常时页面右上角显示“采集正常”。首次启动只能从程序创建计数规则以后开始记录，无法补回此前的历史流量。
+When everything is working, the upper-right corner of the page shows “Collector healthy.” After the first startup, traffic can only be recorded from the point when the application creates its counting rules; earlier traffic cannot be recovered.
 
-如果页面显示采集异常，优先检查：
+If the page reports a collector error, check the following first:
 
 ```bash
 ls -l /var/run/tailscale/tailscaled.sock
@@ -107,18 +107,16 @@ ip link show tailscale0
 docker compose logs collector --tail=100
 ```
 
-## 数据与升级
+## Data and upgrades
 
-持久化文件位于：
+Persistent files are stored at:
 
 ```text
-./config.yaml        # 非敏感运行设置
-./data/traffic.db    # 流量、密码哈希、会话密钥
+./config.yaml        # Non-sensitive runtime settings
+./data/traffic.db    # Traffic data, password hash, and session secret
 ```
 
-采集器和面板通过文件锁安全读写 `config.yaml`，不会读取到写入一半的配置；
-流量和认证数据通过 SQLite WAL 共享。备份前先停止服务，再复制整个 `data`
-目录和根目录的配置文件：
+The collector and dashboard use file locking to safely read and write `config.yaml`, so neither process will read a partially written configuration. Traffic and authentication data are shared through SQLite WAL. Before making a backup, stop the services and copy both the entire `data` directory and the configuration file from the repository root:
 
 ```bash
 docker compose stop
@@ -127,80 +125,69 @@ cp -a config.yaml config.yaml.backup
 docker compose start
 ```
 
-升级全部服务：
+Upgrade all services:
 
 ```bash
 git pull
 docker compose up -d --build
 ```
 
-只更新控制面板，不中断采集：
+Update only the dashboard without interrupting collection:
 
 ```bash
 docker compose up -d --build dashboard
 ```
 
-停止容器不会删除数据，宿主机里的计数链也会保留，采集器重新启动后会继续计算差值。宿主机重启导致计数器归零时，程序会自动从新值继续累计。面板修改限额后，采集器会在下一轮采集时执行，默认最多延迟约 10 秒。
+Stopping the containers does not delete data, and the counting chains on the host remain in place. After the collector restarts, it continues calculating differences from the existing counters. If a host reboot resets the counters to zero, the application automatically continues accumulating from the new values. Changes to limits made in the dashboard are applied on the collector's next cycle, normally within about 10 seconds.
 
-月度总额度、采集间隔、网站记录保留天数和统计时区均在“设置”页面管理，
-并保存在 `./config.yaml`。网站明细采集固定启用。
-collector 会自动读取更新后的配置。密码哈希和会话密钥仍只保存在
-`traffic.db`。从旧版本升级时，数据库中的运行配置会自动迁移到 YAML，
-迁移成功后删除旧配置表。
+The monthly traffic allowance, collection interval, website-record retention period, and reporting time zone are managed on the Settings page and stored in `./config.yaml`. Website-detail collection is always enabled.
+The collector automatically reloads updated settings. The password hash and session secret remain exclusively in `traffic.db`. When upgrading from an older version, runtime settings stored in the database are automatically migrated to YAML, after which the old configuration table is removed.
 
-网站明细默认保留 180 天，按“日期 + 设备 + 域名”聚合，不保存 URL、
-请求路径或单条连接。
+Website details are retained for 180 days by default and aggregated by date, device, and domain. URLs, request paths, and individual connections are not stored.
 
-设备列表默认隐藏“密钥已过期且所选月份流量为 0”的节点。开启“显示
-Expired 设备”后可查看这些历史节点；过期但所选月份有流量的设备始终显示，
-并保留 `Expired` 标记。
+User and device website activity defaults to “Past 1 day,” a rolling 24-hour window independent of the reporting time zone, and can also be viewed by date. Short-term website details are aggregated into 15-minute buckets and retained for approximately 25 hours. Visit times are displayed by the browser in the viewer's local time zone. After an upgrade, short-term details begin accumulating from zero.
 
-用户卡片中的设备列表默认收起，点击用户左侧的小三角可以展开或再次隐藏；
-面板自动刷新时会保留当前展开状态。
+The device list hides nodes whose keys have expired and whose usage for the selected month is zero. Enable “Show expired devices” to view these historical nodes. Expired devices with traffic in the selected month are always shown and retain an `Expired` badge.
 
-Tailscale 会隐藏外部共享节点的真实主机名。未设置设备备注时，面板按 IPv4
-最后一段显示为 `SHARED-DEVICE-xxx`；设备备注按稳定设备 ID 保存在
-`traffic.db`，清空备注即可恢复默认名称。
+Device lists in user cards are collapsed by default. Click the small triangle to the left of a user to expand or collapse the list. Automatic dashboard refreshes preserve the current expanded state.
 
-域名识别采用三种轻量来源：
+Download, upload, and total values for users and devices are shown as “Past 1 day / selected month.” Past-day statistics use 5-minute buckets and are retained for approximately 25 hours without storing individual connection details. After an upgrade, this statistic begins accumulating from zero; the current month's cumulative totals are unaffected.
 
-- 将 VPS 出口 DNS 响应保存为最多 5 分钟的公共 IP→域名候选映射；
-- 对明文 HTTP 新连接读取 `Host` 请求头；
-- 对 TCP HTTPS 新连接读取 TLS ClientHello 中未加密的 SNI。
+Tailscale hides the real hostnames of externally shared nodes. When no device alias is configured, the dashboard uses the last octet of the IPv4 address to display a name such as `SHARED-DEVICE-xxx`. Device aliases are stored in `traffic.db` using the stable device ID. Clear an alias to restore the default name.
 
-抓包套接字附加了内核过滤器，只将 DNS 响应及可能包含 HTTP Host/TLS SNI
-的连接起始包交给 Python。视频和下载连接建立后的数据包不会进入解析流程。
-连接级域名映射和 DNS 映射均为有界内存缓存，不写入原始数据包。
+Domain identification uses three lightweight sources:
 
-## 统计口径
+- Cache exit-node DNS responses for up to five minutes as a shared IP-to-domain candidate mapping;
+- Read the `Host` request header from new plaintext HTTP connections;
+- Read the unencrypted SNI field from the TLS ClientHello of new TCP HTTPS connections.
 
-- “上传”：朋友设备进入出口节点、准备发往公网的 IP 层字节；
-- “下载”：公网响应准备从出口节点发往朋友设备的 IP 层字节；
-- “总计”：上传 + 下载；
-- VPS 服务商可能按网卡层、仅出站、十进制 GB 或 GiB 计费，因此本面板与账单会有少量差异；
-- 每台设备第一次出现在出口节点状态里后，程序才会为它建立独立计数。
-- 用户限额使用该用户所有设备的当月总量；设备限额从本版本部署后开始按设备累计。
-- 达到限额时封锁设备的 IPv4 和 IPv6。手动解锁仅跳过当月，次月自动重新执行规则。
-- 网站访问次数按新连接近似统计，不代表浏览器页面打开次数；
-- DNS、HTTP Host 和 TLS SNI 都属于尽力识别。QUIC/HTTP3、ECH、VPN
-  套 VPN、分段握手或直接连接 IP 时仍可能只显示目标 IP；
-- CDN IP 可能同时服务多个域名，公共 DNS 回退可能偶尔显示同一 IP 最近解析的
-  其他域名；同一连接的 TLS SNI/HTTP Host 会优先于公共 DNS；
-- 网站明细依赖周期性 conntrack 快照，识别流量可能低于设备总流量。
+The packet-capture socket has a kernel filter that passes only DNS responses and the initial packets that may contain HTTP Host or TLS SNI metadata to Python. Packets transferred after video and download connections are established do not enter the parsing pipeline.
+Both connection-level domain mappings and DNS mappings use bounded in-memory caches; raw packets are never written to disk.
 
-## 安全说明
+## Accounting methodology
 
-只有 `collector` 容器使用宿主机网络并具有 `NET_ADMIN`、`NET_RAW`
-能力，这是读取流量、捕获 DNS/连接握手元数据、维护计数规则和执行限额封锁
-所必需的。
-`dashboard` 使用普通 bridge 网络，不接触宿主机防火墙和 Tailscale
-socket。没有配置限额规则时不会封锁任何设备。采集器创建以下自有链和集合：
+- “Upload”: IP-layer bytes entering the exit node from a friend's device, ready to be forwarded to the public internet;
+- “Download”: IP-layer bytes in public-internet responses, ready to be forwarded from the exit node to a friend's device;
+- “Total”: upload + download;
+- VPS providers may bill at the link layer, count only outbound traffic, or use decimal GB instead of GiB, so dashboard totals may differ slightly from provider invoices;
+- An individual counter is created only after a device first appears in the exit node's state;
+- A user limit applies to the current-month total of all that user's devices. Device limits begin accumulating per device after this version is deployed;
+- When a limit is reached, both IPv4 and IPv6 traffic for the device is blocked. Manual unlock bypasses the limit only for the current month, and the rule is enforced again automatically in the next month;
+- Website visit counts approximate new connections and do not represent browser page views;
+- DNS, HTTP Host, and TLS SNI identification are all best effort. QUIC/HTTP3, ECH, VPN-over-VPN connections, fragmented handshakes, and direct IP connections may still show only the destination IP;
+- A CDN IP may serve multiple domains, so the shared DNS fallback may occasionally show another domain that was recently resolved to the same IP. TLS SNI or HTTP Host observed on the same connection takes priority over shared DNS;
+- Website details depend on periodic conntrack snapshots, so identified website traffic may be lower than the device's total traffic.
+
+## Security notes
+
+Only the `collector` container uses host networking and the `NET_ADMIN` and `NET_RAW` capabilities. These permissions are required to read traffic, capture DNS and connection-handshake metadata, maintain counting rules, and enforce quota blocks.
+The `dashboard` uses a regular bridge network and cannot access the host firewall or Tailscale socket. No device is blocked unless a limit rule has been configured. The collector creates the following dedicated chains and sets:
 
 - `TSM_UPLOAD`
 - `TSM_DOWNLOAD`
 - `tsm_upload4` / `tsm_download4`
 - `tsm_upload6` / `tsm_download6`
 - `tsm_block4` / `tsm_block6`
-- `tsm_block4_next` / `tsm_block6_next`（用于原子更新封锁名单）
+- `tsm_block4_next` / `tsm_block6_next` (used for atomic block-list updates)
 
-请只使用可信镜像构建和可信仓库代码。
+Build images only from trusted sources and trusted repository code.

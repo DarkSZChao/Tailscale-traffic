@@ -12,7 +12,10 @@ services:
     volumes:
       - ./data:/data
       - ./config.yaml:/config.yaml
-      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+      # Mount the runtime directory rather than the socket inode itself.
+      # tailscaled replaces its socket during upgrades/restarts; a directory
+      # bind mount lets the collector see the replacement without recreation.
+      - /run/tailscale:/var/run/tailscale:ro
 
   dashboard:
     build:

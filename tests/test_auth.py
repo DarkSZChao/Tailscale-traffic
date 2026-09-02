@@ -67,6 +67,10 @@ class AuthenticationTests(unittest.TestCase):
 
             dashboard = client.get("/api/dashboard")
             self.assertEqual(dashboard.status_code, 200)
+            self.assertEqual(
+                dashboard.json()["timezone"],
+                "America/Los_Angeles",
+            )
 
             device_alias = client.patch(
                 "/api/devices/100.64.0.11",
@@ -102,12 +106,24 @@ class AuthenticationTests(unittest.TestCase):
             self.assertEqual(websites.status_code, 200)
             self.assertEqual(websites.json()["websites"], [])
 
+            recent_websites = client.get(
+                "/api/devices/100.64.0.11/websites?period=24h"
+            )
+            self.assertEqual(recent_websites.status_code, 200)
+            self.assertEqual(recent_websites.json()["period"], "24h")
+            self.assertIsNone(recent_websites.json()["day"])
+
             user_websites = client.get(
                 "/api/users/unknown:100.64.0.11/websites?day=2026-07-28"
             )
             self.assertEqual(user_websites.status_code, 200)
             self.assertEqual(user_websites.json()["device_count"], 1)
             self.assertEqual(user_websites.json()["websites"], [])
+
+            invalid_period = client.get(
+                "/api/devices/100.64.0.11/websites?period=week"
+            )
+            self.assertEqual(invalid_period.status_code, 422)
 
             policy = client.put(
                 "/api/policies/user/unknown:100.64.0.11",

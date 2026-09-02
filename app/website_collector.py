@@ -836,7 +836,7 @@ class WebsiteCollector:
             raise RuntimeError(f"conntrack 读取失败：{message}")
         return result.stdout.splitlines()
 
-    def collect(self) -> None:
+    def collect(self, ignored_device_ips: set[str] | None = None) -> None:
         self.dns_cache.prune()
         self.flow_domains.prune()
         flows = []
@@ -873,6 +873,9 @@ class WebsiteCollector:
                 "conntrack 未提供字节计数，请启用 "
                 "net.netfilter.nf_conntrack_acct=1"
             )
-        self.database.record_website_flows(flows)
+        self.database.record_website_flows(
+            flows,
+            ignored_device_ips or (),
+        )
         self.database.cleanup_website_history(self.retention_days)
         self.database.update_website_status(True, self.last_error)

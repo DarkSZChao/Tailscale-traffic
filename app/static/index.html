@@ -38,9 +38,13 @@
       <div class="sidebar-bottom">
         <span id="collectorStatus" class="status-pill">
           <span class="status-dot"></span>
-          正在连接
+          <span id="collectorStatusText">正在连接</span>
+          <span id="lastCollect" class="last-updated">—</span>
         </span>
-        <span id="lastCollect" class="last-updated">—</span>
+        <div class="sidebar-timezone-clock" title="面板统计时区的当前时间">
+          <span>统计时区 · <b id="panelTimezone">—</b></span>
+          <time id="panelTimezoneTime">—</time>
+        </div>
         <button id="logoutButton" class="logout-button" type="button">退出登录</button>
       </div>
     </aside>
@@ -206,15 +210,62 @@
                 </label>
                 <label>
                   <span>统计时区 <code>timezone</code></span>
-                  <input id="settingTimezone" list="timezoneOptions" maxlength="100" required>
+                  <input id="settingTimezone" list="timezoneOptions" maxlength="100" placeholder="输入城市关键词，例如 Shanghai、London" autocomplete="off" spellcheck="false" required>
                   <datalist id="timezoneOptions">
-                    <option value="Asia/Shanghai">
-                    <option value="America/Los_Angeles">
-                    <option value="America/New_York">
-                    <option value="Europe/London">
-                    <option value="UTC">
+                    <option value="Asia/Shanghai" label="上海 / 北京 / 中国">
+                    <option value="Europe/London" label="伦敦 / 英国">
+                    <option value="America/Los_Angeles" label="洛杉矶 / 美国西岸">
+                    <option value="America/New_York" label="纽约 / 美国东岸">
+                    <option value="UTC" label="协调世界时">
+                    <option value="Asia/Hong_Kong" label="香港">
+                    <option value="Asia/Taipei" label="台北">
+                    <option value="Asia/Tokyo" label="东京 / 日本">
+                    <option value="Asia/Seoul" label="首尔 / 韩国">
+                    <option value="Asia/Singapore" label="新加坡">
+                    <option value="Asia/Bangkok" label="曼谷 / 泰国">
+                    <option value="Asia/Jakarta" label="雅加达 / 印尼">
+                    <option value="Asia/Manila" label="马尼拉 / 菲律宾">
+                    <option value="Asia/Kolkata" label="加尔各答 / 印度">
+                    <option value="Asia/Dubai" label="迪拜 / 阿联酋">
+                    <option value="Asia/Jerusalem" label="耶路撒冷 / 以色列">
+                    <option value="Asia/Riyadh" label="利雅得 / 沙特">
+                    <option value="Europe/Paris" label="巴黎 / 法国">
+                    <option value="Europe/Berlin" label="柏林 / 德国">
+                    <option value="Europe/Amsterdam" label="阿姆斯特丹 / 荷兰">
+                    <option value="Europe/Madrid" label="马德里 / 西班牙">
+                    <option value="Europe/Rome" label="罗马 / 意大利">
+                    <option value="Europe/Zurich" label="苏黎世 / 瑞士">
+                    <option value="Europe/Stockholm" label="斯德哥尔摩 / 瑞典">
+                    <option value="Europe/Warsaw" label="华沙 / 波兰">
+                    <option value="Europe/Athens" label="雅典 / 希腊">
+                    <option value="Europe/Helsinki" label="赫尔辛基 / 芬兰">
+                    <option value="Europe/Kyiv" label="基辅 / 乌克兰">
+                    <option value="Europe/Moscow" label="莫斯科 / 俄罗斯">
+                    <option value="Europe/Istanbul" label="伊斯坦布尔 / 土耳其">
+                    <option value="America/Vancouver" label="温哥华 / 加拿大西岸">
+                    <option value="America/Denver" label="丹佛 / 美国山地">
+                    <option value="America/Chicago" label="芝加哥 / 美国中部">
+                    <option value="America/Toronto" label="多伦多 / 加拿大东岸">
+                    <option value="America/Mexico_City" label="墨西哥城">
+                    <option value="America/Bogota" label="波哥大 / 哥伦比亚">
+                    <option value="America/Lima" label="利马 / 秘鲁">
+                    <option value="America/Santiago" label="圣地亚哥 / 智利">
+                    <option value="America/Sao_Paulo" label="圣保罗 / 巴西">
+                    <option value="America/Argentina/Buenos_Aires" label="布宜诺斯艾利斯 / 阿根廷">
+                    <option value="Africa/Cairo" label="开罗 / 埃及">
+                    <option value="Africa/Johannesburg" label="约翰内斯堡 / 南非">
+                    <option value="Africa/Nairobi" label="内罗毕 / 肯尼亚">
+                    <option value="Africa/Lagos" label="拉各斯 / 尼日利亚">
+                    <option value="Africa/Casablanca" label="卡萨布兰卡 / 摩洛哥">
+                    <option value="Australia/Sydney" label="悉尼 / 澳大利亚东岸">
+                    <option value="Australia/Melbourne" label="墨尔本">
+                    <option value="Australia/Brisbane" label="布里斯班">
+                    <option value="Australia/Perth" label="珀斯 / 澳大利亚西岸">
+                    <option value="Pacific/Auckland" label="奥克兰 / 新西兰">
+                    <option value="Pacific/Honolulu" label="檀香山 / 夏威夷">
+                    <option value="Pacific/Fiji" label="斐济">
                   </datalist>
-                  <small>使用 IANA 时区名称，决定每日和每月边界。</small>
+                  <small>选择常用 IANA 城市时区；输入城市或地区关键词可快速定位。</small>
                 </label>
               </div>
               <p id="settingsMessage" class="settings-message"></p>
@@ -274,16 +325,23 @@
     <form method="dialog" class="dialog-card">
       <div class="dialog-header">
         <div>
-          <p class="section-kicker">DAILY DESTINATIONS</p>
+          <p class="section-kicker">DESTINATION ACTIVITY</p>
           <h2 id="websiteTitle">设备 · 网站访问</h2>
         </div>
         <button class="close-button" value="cancel" aria-label="关闭网站详情">×</button>
       </div>
       <div class="website-toolbar">
-        <label>
-          <span>统计日期</span>
-          <input id="websiteDay" type="date">
-        </label>
+        <div class="website-period-panel">
+          <span class="website-period-label">统计范围</span>
+          <div class="website-period-toggle" role="group" aria-label="网站访问统计范围">
+            <button type="button" data-website-period="24h" aria-pressed="true">过去1天</button>
+            <button type="button" data-website-period="day" aria-pressed="false">按日期</button>
+          </div>
+          <label id="websiteDayField" hidden>
+            <span>统计日期 · 按面板时区</span>
+            <input id="websiteDay" type="date">
+          </label>
+        </div>
         <div class="website-summary">
           <span><small>目标数</small><b id="websiteDestinations">—</b></span>
           <span><small>访问次数</small><b id="websiteVisits">—</b></span>

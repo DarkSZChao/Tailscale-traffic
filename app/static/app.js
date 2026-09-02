@@ -3,6 +3,9 @@ const state = {
   selectedAliasTarget: null,
   activePolicyTarget: null,
   activeWebsiteTarget: null,
+  activeWebsitePeriod: "24h",
+  panelTimezone: "",
+  panelTimezoneFormatter: null,
   settingsLoaded: false,
   chartBars: [],
   currentPage: "overview",
@@ -24,7 +27,7 @@ const PAGE_META = {
   users: {
     eyebrow: "EXIT ACCESS / DEVICES",
     title: "出口控制",
-    description: "查看每位用户及其所属设备的实际用量、访问记录，并直接管理流量与封禁规则。",
+    description: "查看用户及其所属设备的出口用量、访问记录，并直接管理。",
     usesMonth: true,
   },
   rules: {
@@ -116,6 +119,18 @@ function formatBytes(bytes, compact = false) {
   const number = value / 1000 ** index;
   const digits = compact ? (number >= 100 ? 0 : number >= 10 ? 1 : 2) : (number >= 10 ? 1 : 2);
   return `${number.toFixed(digits)} ${units[index]}`;
+}
+
+function formatUsagePair(recentBytes, monthBytes) {
+  const recent = formatBytes(recentBytes, true).replace(" ", "");
+  const month = formatBytes(monthBytes, true).replace(" ", "");
+  return `${recent}/${month}`;
+}
+
+function usagePeriodLabel() {
+  return state.payload?.month === state.payload?.current_month
+    ? "过去1天/当月"
+    : `过去1天/${state.payload?.month || "所选月"}`;
 }
 
 function formatTime(value) {
@@ -215,9 +230,42 @@ function setCollectorStatus(collector, lastCollect) {
   const status = $("#collectorStatus");
   const healthy = Boolean(collector?.healthy);
   status.classList.toggle("error", !healthy);
-  status.innerHTML = `<span class="status-dot"></span>${healthy ? "采集正常" : "采集异常"}`;
+  $("#collectorStatusText").textContent = healthy ? "采集正常" : "采集异常";
   status.title = collector?.error || "";
   $("#lastCollect").textContent = `更新于 ${formatTime(lastCollect)}`;
+}
+
+function setPanelTimezone(timezone) {
+  const normalized = String(timezone || "UTC");
+  if (state.panelTimezone === normalized && state.panelTimezoneFormatter) {
+    return;
+  }
+  state.panelTimezone = normalized;
+  $("#panelTimezone").textContent = normalized;
+  $("#panelTimezone").title = normalized;
+  try {
+    state.panelTimezoneFormatter = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: normalized,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+  } catch {
+    state.panelTimezoneFormatter = null;
+  }
+  updatePanelTimezoneClock();
+}
+
+function updatePanelTimezoneClock() {
+  const clock = $("#panelTimezoneTime");
+  clock.textContent = state.panelTimezoneFormatter
+    ? state.panelTimezoneFormatter.format(new Date())
+    : "时区不可用";
+  clock.dateTime = new Date().toISOString();
 }
 
 function renderSummary(summary) {
@@ -558,6 +606,7 @@ function renderUsers(users, total) {
 
   list.hidden = false;
   empty.hidden = true;
+  const periodLabel = usagePeriodLabel();
   list.innerHTML = users.map((user) => {
     const share = total ? (user.total / total) * 100 : 0;
     const scope = user.network_scope === "tailnet"
@@ -619,9 +668,9 @@ function renderUsers(users, total) {
         </header>
 
         <div class="user-usage-summary">
-          <div><span>下载</span><strong>${formatBytes(user.download, true)}</strong></div>
-          <div><span>上传</span><strong>${formatBytes(user.upload, true)}</strong></div>
-          <div><span>用户总计</span><strong>${formatBytes(user.total, true)}</strong></div>
+          <div><span>下载 · ${periodLabel}</span><strong>${formatUsagePair(user.recent_24h_download, user.download)}</strong></div>
+          <div><span>上传 · ${periodLabel}</span><strong>${formatUsagePair(user.recent_24h_upload, user.upload)}</strong></div>
+          <div><span>用户总计 · ${periodLabel}</span><strong>${formatUsagePair(user.recent_24h_total, user.total)}</strong></div>
           <div>
             <span>占全部出口流量</span>
             <strong>${share.toFixed(1)}%</strong>
@@ -638,7 +687,9 @@ function renderUsers(users, total) {
                 : ""}
             </div>
             <div class="device-column-labels" aria-hidden="true">
-              <span>下载</span><span>上传</span><span>总计</span>
+              <span>下载<small>${periodLabel}</small></span>
+              <span>上传<small>${periodLabel}</small></span>
+              <span>总计<small>${periodLabel}</small></span>
             </div>
             <span class="device-action-spacer" aria-hidden="true"></span>
           </div>
@@ -658,9 +709,9 @@ function renderUsers(users, total) {
                   </div>
                 </div>
                 <div class="inline-device-traffic">
-                  <span aria-label="下载 ${formatBytes(device.download, true)}"><b>${formatBytes(device.download, true)}</b></span>
-                  <span aria-label="上传 ${formatBytes(device.upload, true)}"><b>${formatBytes(device.upload, true)}</b></span>
-                  <span aria-label="总计 ${formatBytes(device.total, true)}"><b>${formatBytes(device.total, true)}</b></span>
+                  <span aria-label="下载，${periodLabel} ${formatUsagePair(device.recent_24h_download, device.download)}"><b>${formatUsagePair(device.recent_24h_download, device.download)}</b></span>
+                  <span aria-label="上传，${periodLabel} ${formatUsagePair(device.recent_24h_upload, device.upload)}"><b>${formatUsagePair(device.recent_24h_upload, device.upload)}</b></span>
+                  <span aria-label="总计，${periodLabel} ${formatUsagePair(device.recent_24h_total, device.total)}"><b>${formatUsagePair(device.recent_24h_total, device.total)}</b></span>
                 </div>
                 <div class="inline-device-actions">
                   <button
@@ -918,28 +969,47 @@ function localDay() {
   ].join("-");
 }
 
-function websiteTime(value) {
+function websiteTime(value, includeDate = false) {
   if (!value) return "—";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.valueOf())) return value;
-  return parsed.toLocaleTimeString("zh-CN", {
+  const options = {
     hour: "2-digit",
     minute: "2-digit",
+  };
+  if (includeDate) {
+    options.month = "2-digit";
+    options.day = "2-digit";
+  }
+  return parsed.toLocaleString("zh-CN", options);
+}
+
+function setWebsitePeriod(period, load = true) {
+  state.activeWebsitePeriod = period === "day" ? "day" : "24h";
+  document.querySelectorAll("[data-website-period]").forEach((button) => {
+    const active = button.dataset.websitePeriod === state.activeWebsitePeriod;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   });
+  $("#websiteDayField").hidden = state.activeWebsitePeriod !== "day";
+  if (load && state.activeWebsiteTarget) loadWebsiteDetails();
 }
 
 async function loadWebsiteDetails() {
   const target = state.activeWebsiteTarget;
   const day = $("#websiteDay").value;
+  const period = state.activeWebsitePeriod;
   const list = $("#websiteList");
-  if (!target || !day) return;
-  list.innerHTML = '<div class="website-loading">正在读取当天网站统计…</div>';
+  if (!target || (period === "day" && !day)) return;
+  list.innerHTML = `<div class="website-loading">正在读取${period === "24h" ? "过去1天" : "当天"}网站统计…</div>`;
   try {
     const targetPath = target.type === "user"
       ? `/api/users/${encodeURIComponent(target.key)}/websites`
       : `/api/devices/${encodeURIComponent(target.key)}/websites`;
+    const params = new URLSearchParams({ period });
+    if (period === "day") params.set("day", day);
     const response = requireLogin(
-      await fetch(`${targetPath}?day=${day}`)
+      await fetch(`${targetPath}?${params}`)
     );
     if (!response.ok) throw new Error("读取网站统计失败");
     const payload = await response.json();
@@ -951,17 +1021,21 @@ async function loadWebsiteDetails() {
     const aggregationNote = target.type === "user"
       ? `已聚合该用户 ${payload.device_count || 0} 台设备。`
       : "";
+    const periodNote = payload.period === "24h"
+      ? "当前为滚动过去1天，不受面板统计时区影响；访问时间按当前浏览器时区显示。"
+      : `当前按 ${payload.timezone || "面板设置"} 的自然日统计；访问时间按当前浏览器时区显示。`;
     $("#websiteTrackingNote").textContent = tracking.error
       ? tracking.error
-      : `${aggregationNote}域名由出口 DNS、HTTP Host 和 TLS SNI 尽力识别；Docker 转发访问显示为 docker://VPS地址:端口，QUIC/ECH 等流量可能只显示目标 IP。`;
+      : `${aggregationNote}${periodNote}域名由出口 DNS、HTTP Host 和 TLS SNI 尽力识别；Docker 转发访问显示为 docker://VPS地址:端口，QUIC/ECH 等流量可能只显示目标 IP。`;
 
     const websites = payload.websites || [];
+    const includeDate = payload.period === "24h";
     list.innerHTML = websites.length
       ? websites.map((item) => `
         <article class="website-row">
           <div class="website-destination">
             <b>${escapeHtml(item.destination)}</b>
-            <small>${websiteTime(item.first_seen)} – ${websiteTime(item.last_seen)}</small>
+            <small>${websiteTime(item.first_seen, includeDate)} – ${websiteTime(item.last_seen, includeDate)}</small>
           </div>
           <span><small>访问</small><b>${item.visits} 次</b></span>
           <span><small>下载</small><b>${formatBytes(item.download, true)}</b></span>
@@ -969,7 +1043,7 @@ async function loadWebsiteDetails() {
           <span><small>总计</small><b>${formatBytes(item.total, true)}</b></span>
         </article>
       `).join("")
-      : '<div class="website-empty">这一天还没有识别到网站访问记录。</div>';
+      : `<div class="website-empty">${period === "24h" ? "过去1天" : "这一天"}还没有识别到网站访问记录。</div>`;
   } catch (error) {
     list.innerHTML = `<div class="website-empty">${escapeHtml(error.message)}</div>`;
   }
@@ -983,6 +1057,7 @@ function openWebsiteDetails(type, key, name) {
   const dayInput = $("#websiteDay");
   dayInput.max = localDay();
   dayInput.value = localDay();
+  setWebsitePeriod("24h", false);
   $("#websiteDialog").showModal();
   loadWebsiteDetails();
 }
@@ -1277,6 +1352,7 @@ async function loadDashboard() {
     if (!response.ok) throw new Error(`面板接口返回 ${response.status}`);
     const payload = await response.json();
     state.payload = payload;
+    setPanelTimezone(payload.timezone);
     monthPicker.value = payload.month;
     updateMonthReset();
     renderSummary(payload.summary);
@@ -1286,7 +1362,7 @@ async function loadDashboard() {
   } catch (error) {
     const status = $("#collectorStatus");
     status.classList.add("error");
-    status.innerHTML = '<span class="status-dot"></span>面板异常';
+    $("#collectorStatusText").textContent = "面板异常";
     status.title = error.message;
     showToast(error.message);
   }
@@ -1343,7 +1419,14 @@ $("#resetMonth").addEventListener("click", () => {
 });
 $("#showExpiredDevices").addEventListener("change", loadDashboard);
 $("#saveAlias").addEventListener("click", saveAlias);
-$("#websiteDay").addEventListener("change", loadWebsiteDetails);
+$("#websiteDay").addEventListener("change", () => {
+  if (state.activeWebsitePeriod === "day") loadWebsiteDetails();
+});
+document.querySelectorAll("[data-website-period]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setWebsitePeriod(button.dataset.websitePeriod);
+  });
+});
 $("#savePolicy").addEventListener("click", savePolicy);
 $("#deletePolicy").addEventListener("click", deletePolicy);
 $("#unlockPolicy").addEventListener("click", unlockPolicy);
@@ -1371,3 +1454,4 @@ setupDialogInteractions();
 showPage(pageFromHash());
 loadDashboard();
 window.setInterval(loadDashboard, 30_000);
+window.setInterval(updatePanelTimezoneClock, 1_000);

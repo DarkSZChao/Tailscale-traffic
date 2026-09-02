@@ -180,11 +180,52 @@ button {
   margin-top: auto;
 }
 
-.sidebar-bottom .last-updated {
-  padding: 0 3px;
-  color: #65716c;
+.sidebar-bottom .status-pill {
+  width: 100%;
+  gap: 5px;
+  padding: 7px 8px;
   font-size: 13px;
+  white-space: nowrap;
+}
+
+.sidebar-bottom .last-updated {
+  min-width: 0;
+  margin-left: auto;
+  padding: 0;
+  color: #65716c;
+  font-size: 10px;
   line-height: 1.5;
+}
+
+.sidebar-timezone-clock {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 0 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-timezone-clock span {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  color: #65716c;
+  font-size: 10px;
+}
+
+.sidebar-timezone-clock b {
+  overflow: hidden;
+  color: #8d9994;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-timezone-clock time {
+  color: #aeb8b4;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: nowrap;
 }
 
 .sidebar-bottom .logout-button {
@@ -868,7 +909,7 @@ h2 {
 
 .user-devices-heading {
   display: grid;
-  grid-template-columns: minmax(240px, 1.15fr) minmax(240px, 0.9fr) 250px;
+  grid-template-columns: minmax(240px, 1.15fr) minmax(270px, 0.9fr) 250px;
   align-items: center;
   gap: 14px;
   padding: 14px 21px 7px;
@@ -897,11 +938,25 @@ h2 {
 
 .device-column-labels {
   display: grid;
-  grid-template-columns: repeat(3, minmax(68px, 1fr));
+  grid-template-columns: repeat(3, minmax(78px, 1fr));
   gap: 8px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
+}
+
+.device-column-labels span {
+  display: grid;
+  gap: 2px;
+}
+
+.device-column-labels small {
+  overflow: hidden;
+  color: #77817d;
+  font-size: 9px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .device-action-spacer {
@@ -915,7 +970,7 @@ h2 {
 
 .inline-device {
   display: grid;
-  grid-template-columns: minmax(240px, 1.15fr) minmax(240px, 0.9fr) 250px;
+  grid-template-columns: minmax(240px, 1.15fr) minmax(270px, 0.9fr) 250px;
   align-items: center;
   gap: 14px;
   padding: 10px 0;
@@ -983,7 +1038,7 @@ h2 {
 
 .inline-device-traffic {
   display: grid;
-  grid-template-columns: repeat(3, minmax(68px, 1fr));
+  grid-template-columns: repeat(3, minmax(78px, 1fr));
   gap: 8px;
 }
 
@@ -993,7 +1048,7 @@ h2 {
 
 .inline-device-traffic b {
   color: #d9dfdc;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .no-devices {
@@ -1740,16 +1795,52 @@ dialog::backdrop {
 
 .website-toolbar {
   display: grid;
-  grid-template-columns: minmax(170px, 0.55fr) minmax(360px, 1.45fr);
+  grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr);
+  align-items: start;
   gap: 14px;
   margin-top: 24px;
 }
 
-.website-toolbar > label {
+.website-period-panel,
+.website-period-panel > label {
   display: grid;
   gap: 8px;
   color: var(--muted);
   font-size: 10px;
+}
+
+.website-period-panel > label[hidden] {
+  display: none;
+}
+
+.website-period-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #0e1312;
+}
+
+.website-period-toggle button {
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--muted);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.website-period-toggle button.active {
+  color: #101512;
+  background: var(--lime);
+}
+
+.website-period-toggle button:focus-visible {
+  outline: 2px solid var(--mint);
+  outline-offset: 1px;
 }
 
 .website-toolbar input {
@@ -2476,11 +2567,11 @@ dialog::backdrop {
   }
 
   .inline-device {
-    grid-template-columns: minmax(0, 1fr) minmax(180px, 0.8fr);
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 0.8fr);
   }
 
   .user-devices-heading {
-    grid-template-columns: minmax(0, 1fr) minmax(180px, 0.8fr);
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 0.8fr);
   }
 
   .device-action-spacer {
@@ -2536,6 +2627,14 @@ dialog::backdrop {
 
   .sidebar-bottom {
     display: grid;
+  }
+
+  .sidebar-bottom .status-pill {
+    font-size: 11px;
+  }
+
+  .sidebar-bottom .last-updated {
+    font-size: 9px;
   }
 
   .sidebar-nav {
