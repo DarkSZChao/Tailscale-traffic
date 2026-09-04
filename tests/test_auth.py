@@ -151,6 +151,22 @@ class AuthenticationTests(unittest.TestCase):
             self.assertEqual(enabled.status_code, 200)
             self.assertTrue(enabled.json()["policy"]["enabled"])
 
+            quota_disabled = client.put(
+                "/api/policies/user/unknown:100.64.0.11/quota/enabled",
+                json={"enabled": False},
+            )
+            self.assertEqual(quota_disabled.status_code, 200)
+            self.assertFalse(
+                quota_disabled.json()["policy"]["quota_enabled"]
+            )
+
+            quota_enabled = client.put(
+                "/api/policies/user/unknown:100.64.0.11/quota/enabled",
+                json={"enabled": True},
+            )
+            self.assertEqual(quota_enabled.status_code, 200)
+            self.assertTrue(quota_enabled.json()["policy"]["quota_enabled"])
+
             unlocked = client.post(
                 "/api/policies/user/unknown:100.64.0.11/unlock"
             )

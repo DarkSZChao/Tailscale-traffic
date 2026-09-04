@@ -2,6 +2,8 @@ const state = {
   payload: null,
   selectedAliasTarget: null,
   activePolicyTarget: null,
+  activePolicyRule: "quota",
+  activeAccessBlockMode: "temporary",
   activeWebsiteTarget: null,
   activeWebsitePeriod: "24h",
   panelTimezone: "",
@@ -33,7 +35,7 @@ const PAGE_META = {
   rules: {
     eyebrow: "TRAFFIC & ACCESS / POLICIES",
     title: "规则",
-    description: "集中管理用户和设备的流量限额、临时封禁、永久封禁及解除状态。",
+    description: "按用户和设备分别管理流量上限封禁与手动封禁。",
     usesMonth: false,
   },
   settings: {
@@ -46,33 +48,56 @@ const PAGE_META = {
 
 const POLICY_RULE_REGISTRY = Object.freeze({
   quota: {
+    panel: "quota",
     submit: () => savePolicy(),
   },
-  access: {
-    submit: () => setAccessBlock($("#accessBlockPermanent").checked),
+  manual: {
+    panel: "access",
+    submit: () => setAccessBlock(state.activeAccessBlockMode === "permanent"),
   },
 });
 
 function selectPolicyRule(type) {
   const selectedType = POLICY_RULE_REGISTRY[type] ? type : "quota";
-  $("#policyRuleType").value = selectedType;
+  state.activePolicyRule = selectedType;
+  document.querySelectorAll("[data-policy-rule]").forEach((button) => {
+    const selected = button.dataset.policyRule === selectedType;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-checked", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
   document.querySelectorAll("[data-policy-rule-panel]").forEach((panel) => {
-    panel.hidden = panel.dataset.policyRulePanel !== selectedType;
+    const selected = panel.dataset.policyRulePanel
+      === POLICY_RULE_REGISTRY[selectedType].panel;
+    panel.classList.toggle("active", selected);
+    panel.setAttribute("aria-hidden", String(!selected));
+    panel.inert = !selected;
   });
 }
 
 function submitSelectedPolicyRule() {
-  const selectedType = $("#policyRuleType").value;
-  POLICY_RULE_REGISTRY[selectedType]?.submit();
+  POLICY_RULE_REGISTRY[state.activePolicyRule]?.submit();
 }
 
-function updateAccessBlockMode() {
-  const permanent = $("#accessBlockPermanent").checked;
-  $("#accessBlockDurationField").hidden = permanent;
+function updateAccessBlockMode(permanent) {
+  const durationField = $("#accessBlockDurationField");
+  durationField.classList.toggle("mode-hidden", permanent);
+  durationField.setAttribute("aria-hidden", String(permanent));
+  durationField.inert = permanent;
   const button = $("#saveAccessBlock");
   button.textContent = permanent ? "应用永久封禁" : "应用临时封禁";
-  button.classList.toggle("primary-action", !permanent);
-  button.classList.toggle("danger-action", permanent);
+}
+
+function selectAccessBlockMode(mode) {
+  const selectedMode = mode === "permanent" ? "permanent" : "temporary";
+  state.activeAccessBlockMode = selectedMode;
+  document.querySelectorAll("[data-access-block-mode]").forEach((button) => {
+    const selected = button.dataset.accessBlockMode === selectedMode;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-checked", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  updateAccessBlockMode(selectedMode === "permanent");
 }
 
 function pageFromHash() {
@@ -180,28 +205,38 @@ function formatBlockUntil(value) {
 }
 
 function policyBadge(policy) {
-  if (policy?.manual_blocked) {
+  if (!policy) return "";
+  if (policy.manual_blocked) {
     const label = policy.block_mode === "permanent" ? "永久封禁" : "临时封禁";
     return `<span class="quota-badge blocked">${label}</span>`;
   }
-  if (!policy?.limit_bytes) return "";
   if (policy.quota_blocked) {
     return '<span class="quota-badge blocked">已封锁</span>';
   }
-  if (policy.bypassed) {
+  if (policy.quota_enabled && policy.bypassed) {
     return '<span class="quota-badge bypassed">本月已解锁</span>';
   }
-  return '<span class="quota-badge">有限额</span>';
+  return policy.quota_enabled && policy.limit_bytes
+    ? '<span class="quota-badge">有限额</span>'
+    : "";
 }
 
 function policySummary(policy) {
-  if (policy?.manual_blocked) {
-    return policy.block_mode === "permanent" ? "永久封禁" : "临时封禁";
+  if (!policy) return "未设置";
+  const summaries = [];
+  if (policy.limit_bytes) {
+    summaries.push(policy.quota_enabled
+      ? `流量上限 ${formatBytes(policy.usage_bytes, true)} / ${formatBytes(policy.limit_bytes, true)}`
+      : "流量上限封禁已停用");
   }
-  if (!policy?.limit_bytes) return "未设置";
-  if (policy.quota_blocked) return "已封锁";
-  if (policy.bypassed) return "本月已解锁";
-  return `${formatBytes(policy.usage_bytes, true)} / ${formatBytes(policy.limit_bytes, true)}`;
+  if (policy.access_exists) {
+    summaries.push(policy.access_enabled
+      ? (policy.access_active
+          ? (policy.block_mode === "permanent" ? "永久封禁" : "临时封禁")
+          : "手动封禁已到期")
+      : "手动封禁已停用");
+  }
+  return summaries.join("；") || "未设置";
 }
 
 function escapeHtml(value) {
@@ -399,97 +434,123 @@ async function changePanelPassword(event) {
 function renderRules(rules) {
   const list = $("#rulesList");
   const empty = $("#rulesEmpty");
-  $("#rulesCount").textContent = `${rules.length} 条规则`;
-  list.hidden = !rules.length;
-  empty.hidden = Boolean(rules.length);
+  const ruleCount = rules.reduce(
+    (count, rule) => count
+      + (rule.policy?.limit_bytes ? 1 : 0)
+      + (rule.policy?.access_exists ? 1 : 0),
+    0
+  );
+  $("#rulesCount").textContent = `${ruleCount} 条规则 · ${rules.length} 个对象`;
+  list.hidden = !ruleCount;
+  empty.hidden = Boolean(ruleCount);
 
   list.innerHTML = rules.map((rule) => {
     const policy = rule.policy || {};
-    const ratio = policy.limit_bytes
-      ? Math.min(100, (policy.usage_bytes / policy.limit_bytes) * 100)
-      : 0;
-    const blocked = Boolean(policy.blocked);
-    const manualBlocked = Boolean(policy.manual_blocked);
     const targetRemoved = Boolean(rule.target_removed || policy.target_removed);
-    const enabled = policy.enabled !== false;
     const typeLabel = rule.target_type === "user" ? "用户" : "设备";
-    const stateLabel = targetRemoved
-      ? "规则未生效"
-      : !enabled
-        ? "规则已停用"
-      : manualBlocked
-      ? (policy.block_mode === "permanent" ? "永久封禁" : "临时封禁")
-      : policy.quota_blocked
-        ? "已达到限额"
-      : policy.bypassed
-        ? "本月已解锁"
-        : "规则生效中";
-    const stateHint = targetRemoved
-      ? "因为用户已移除"
-      : !enabled
-        ? "开启后恢复生效"
-      : manualBlocked
-      ? (policy.block_mode === "permanent"
-          ? "手动解除后恢复"
-          : `至 ${formatBlockUntil(policy.block_until)}`)
-      : policy.bypassed
-      ? "下月恢复执行"
-      : policy.quota_blocked
-        ? `使用率 ${ratio.toFixed(1)}%`
-        : policy.limit_bytes
-          ? `剩余 ${formatBytes(Math.max(0, policy.limit_bytes - policy.usage_bytes), true)}`
-          : "未设置流量限额";
+    const configuredRules = [];
+
+    if (policy.limit_bytes) {
+      const ratio = Math.min(100, (policy.usage_bytes / policy.limit_bytes) * 100);
+      const enabled = policy.quota_enabled !== false;
+      const blocked = Boolean(policy.quota_blocked);
+      const stateLabel = targetRemoved
+        ? "规则未生效"
+        : !enabled
+          ? "已停用"
+          : blocked
+            ? "已达到限额"
+            : policy.bypassed
+              ? "本月已解锁"
+              : "监控中";
+      const stateHint = targetRemoved
+        ? "目标已移除"
+        : !enabled
+          ? "仅停用流量上限封禁"
+          : blocked
+            ? `使用率 ${ratio.toFixed(1)}%`
+            : policy.bypassed
+              ? "下月恢复执行"
+              : `剩余 ${formatBytes(Math.max(0, policy.limit_bytes - policy.usage_bytes), true)}`;
+      configuredRules.push(`
+        <section class="rule-item quota-rule ${blocked ? "blocked" : ""} ${enabled ? "" : "disabled-rule"}">
+          <div class="rule-kind">
+            <b>流量上限封禁</b>
+            <small>按月度用量自动执行</small>
+          </div>
+          <div class="rule-usage">
+            <span>
+              <small>本月用量</small>
+              <b>${formatBytes(policy.usage_bytes, true)} / ${formatBytes(policy.limit_bytes, true)}</b>
+            </span>
+            <span class="rule-progress" aria-label="限额使用率 ${ratio.toFixed(1)}%">
+              <i style="width:${ratio}%"></i>
+            </span>
+          </div>
+          <div class="rule-state">
+            <b>${stateLabel}</b>
+            <span>${stateHint}</span>
+          </div>
+          ${ruleActions(rule, "quota", enabled, targetRemoved)}
+        </section>
+      `);
+    }
+
+    if (policy.access_exists) {
+      const enabled = policy.access_enabled !== false;
+      const active = Boolean(policy.access_active);
+      const blocked = Boolean(policy.manual_blocked);
+      const permanent = policy.block_mode === "permanent";
+      const stateLabel = targetRemoved
+        ? "规则未生效"
+        : !enabled
+          ? "已停用"
+          : !active
+            ? "已到期"
+            : permanent
+              ? "永久封禁中"
+              : "临时封禁中";
+      const stateHint = targetRemoved
+        ? "目标已移除"
+        : !enabled
+          ? "仅停用手动封禁"
+          : !active
+            ? "可编辑后重新应用"
+            : permanent
+              ? "解除前持续生效"
+              : `至 ${formatBlockUntil(policy.block_until)}`;
+      configuredRules.push(`
+        <section class="rule-item access-rule ${blocked ? "blocked" : ""} ${enabled ? "" : "disabled-rule"}">
+          <div class="rule-kind">
+            <b>手动封禁</b>
+            <small>${permanent ? "永久模式" : "临时模式"}</small>
+          </div>
+          <div class="rule-config">
+            <small>封禁方式</small>
+            <b>${permanent ? "永久封禁" : `临时封禁至 ${formatBlockUntil(policy.block_until)}`}</b>
+          </div>
+          <div class="rule-state">
+            <b>${stateLabel}</b>
+            <span>${stateHint}</span>
+          </div>
+          ${ruleActions(rule, "access", enabled, targetRemoved)}
+        </section>
+      `);
+    }
+
     return `
-      <article class="rule-card ${rule.target_type} ${blocked ? "blocked" : ""} ${targetRemoved ? "removed-target" : ""} ${enabled ? "" : "disabled-rule"}">
-        <div class="rule-identity">
-          <span class="rule-type">${typeLabel}</span>
-          <span>
-            <b>${escapeHtml(rule.target_name)}</b>
-            <small>${escapeHtml(rule.subtitle)}</small>
-          </span>
-        </div>
-        <div class="rule-usage">
-          <span>
-            <small>${policy.limit_bytes ? "本月用量" : "流量限额"}</small>
-            <b>${policy.limit_bytes
-              ? `${formatBytes(policy.usage_bytes, true)} / ${formatBytes(policy.limit_bytes, true)}`
-              : "未设置"}</b>
-          </span>
-          <span class="rule-progress" aria-label="${policy.limit_bytes ? `限额使用率 ${ratio.toFixed(1)}%` : "未设置流量限额"}">
-            <i style="width:${ratio}%"></i>
-          </span>
-        </div>
-        <div class="rule-state">
-          <b>${stateLabel}</b>
-          <span>${stateHint}</span>
-        </div>
-        <div class="rule-actions">
-          <label class="rule-toggle" title="${targetRemoved ? "用户已移除，无法更改规则状态" : enabled ? "停用规则" : "启用规则"}">
-            <input
-              class="rule-enabled-toggle"
-              type="checkbox"
-              data-target-type="${escapeHtml(rule.target_type)}"
-              data-target-key="${escapeHtml(rule.target_key)}"
-              ${enabled ? "checked" : ""}
-              ${targetRemoved ? "disabled" : ""}
-            >
-            <span class="rule-toggle-track" aria-hidden="true"></span>
-            <em>${enabled ? "已启用" : "已停用"}</em>
-          </label>
-          <button
-            class="rule-edit-button"
-            type="button"
-            data-target-type="${escapeHtml(rule.target_type)}"
-            data-target-key="${escapeHtml(rule.target_key)}"
-            ${targetRemoved ? "disabled title=\"用户已移除，无法编辑规则\"" : ""}
-          >编辑</button>
-          <button
-            class="rule-delete-button"
-            type="button"
-            data-target-type="${escapeHtml(rule.target_type)}"
-            data-target-key="${escapeHtml(rule.target_key)}"
-          >删除</button>
-        </div>
+      <article class="rule-card rule-group ${rule.target_type} ${policy.blocked ? "blocked" : ""} ${targetRemoved ? "removed-target" : ""}">
+        <header class="rule-group-header">
+          <div class="rule-identity">
+            <span class="rule-type">${typeLabel}</span>
+            <span>
+              <b>${escapeHtml(rule.target_name)}</b>
+              <small>${escapeHtml(rule.subtitle)}</small>
+            </span>
+          </div>
+          <span class="rule-group-count">${configuredRules.length} 条规则</span>
+        </header>
+        <div class="rule-items">${configuredRules.join("")}</div>
       </article>
     `;
   }).join("");
@@ -505,7 +566,8 @@ function renderRules(rules) {
           rule.target_type,
           rule.target_key,
           rule.target_name,
-          rule.policy
+          rule.policy,
+          button.dataset.ruleType
         );
       }
     });
@@ -517,7 +579,9 @@ function renderRules(rules) {
         (item) => item.target_type === input.dataset.targetType
           && item.target_key === input.dataset.targetKey
       );
-      if (rule) toggleRuleEnabled(rule, input.checked, input);
+      if (rule) {
+        toggleRuleEnabled(rule, input.dataset.ruleType, input.checked, input);
+      }
     });
   });
 
@@ -527,17 +591,54 @@ function renderRules(rules) {
         (item) => item.target_type === button.dataset.targetType
           && item.target_key === button.dataset.targetKey
       );
-      if (rule) deleteRuleCard(rule, button);
+      if (rule) deleteRuleItem(rule, button.dataset.ruleType, button);
     });
   });
 }
 
-async function toggleRuleEnabled(rule, enabled, input) {
+function ruleActions(rule, ruleType, enabled, targetRemoved) {
+  const typeName = ruleType === "quota" ? "流量上限封禁" : "手动封禁";
+  return `
+    <div class="rule-actions">
+      <label class="rule-toggle" title="${targetRemoved ? "目标已移除，无法更改规则状态" : enabled ? `停用${typeName}` : `启用${typeName}`}">
+        <input
+          class="rule-enabled-toggle"
+          type="checkbox"
+          data-target-type="${escapeHtml(rule.target_type)}"
+          data-target-key="${escapeHtml(rule.target_key)}"
+          data-rule-type="${ruleType}"
+          ${enabled ? "checked" : ""}
+          ${targetRemoved ? "disabled" : ""}
+        >
+        <span class="rule-toggle-track" aria-hidden="true"></span>
+        <em>${enabled ? "已启用" : "已停用"}</em>
+      </label>
+      <button
+        class="rule-edit-button"
+        type="button"
+        data-target-type="${escapeHtml(rule.target_type)}"
+        data-target-key="${escapeHtml(rule.target_key)}"
+        data-rule-type="${ruleType}"
+        ${targetRemoved ? "disabled title=\"目标已移除，无法编辑规则\"" : ""}
+      >编辑</button>
+      <button
+        class="rule-delete-button"
+        type="button"
+        data-target-type="${escapeHtml(rule.target_type)}"
+        data-target-key="${escapeHtml(rule.target_key)}"
+        data-rule-type="${ruleType}"
+      >删除</button>
+    </div>
+  `;
+}
+
+async function toggleRuleEnabled(rule, ruleType, enabled, input) {
   input.disabled = true;
+  const typeName = ruleType === "quota" ? "流量上限封禁" : "手动封禁";
   try {
     const response = requireLogin(
       await fetch(
-        `/api/policies/${rule.target_type}/${encodeURIComponent(rule.target_key)}/enabled`,
+        `/api/policies/${rule.target_type}/${encodeURIComponent(rule.target_key)}/${ruleType}/enabled`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -548,7 +649,7 @@ async function toggleRuleEnabled(rule, enabled, input) {
     if (!response.ok) {
       throw new Error(await policyError(response, "更新规则状态失败"));
     }
-    showToast(enabled ? "规则已启用" : "规则已停用");
+    showToast(`${typeName}已${enabled ? "启用" : "停用"}`);
     await Promise.all([loadRules(), loadDashboard()]);
   } catch (error) {
     input.checked = !enabled;
@@ -557,20 +658,21 @@ async function toggleRuleEnabled(rule, enabled, input) {
   }
 }
 
-async function deleteRuleCard(rule, button) {
-  if (!window.confirm(`确定删除 ${rule.target_name} 的全部规则吗？`)) return;
+async function deleteRuleItem(rule, ruleType, button) {
+  const typeName = ruleType === "quota" ? "流量上限封禁" : "手动封禁";
+  if (!window.confirm(`确定删除 ${rule.target_name} 的${typeName}吗？`)) return;
   button.disabled = true;
   try {
     const response = requireLogin(
       await fetch(
-        `/api/policies/${rule.target_type}/${encodeURIComponent(rule.target_key)}/rule`,
+        `/api/policies/${rule.target_type}/${encodeURIComponent(rule.target_key)}${ruleType === "access" ? "/block" : ""}`,
         { method: "DELETE" }
       )
     );
     if (!response.ok) {
       throw new Error(await policyError(response, "删除规则失败"));
     }
-    showToast("规则已删除");
+    showToast(`${typeName}已删除`);
     await Promise.all([loadRules(), loadDashboard()]);
   } catch (error) {
     button.disabled = false;
@@ -615,6 +717,11 @@ function renderUsers(users, total) {
         ? { label: "外部分享", className: "external" }
         : { label: "未识别", className: "unknown" };
     const devices = user.device_items || [];
+    const blockedDeviceCount = devices.filter(
+      (device) => Boolean(device.policy?.blocked)
+    ).length;
+    const hasPartiallyBlockedDevices = blockedDeviceCount > 0
+      && !user.policy?.blocked;
     const deviceTotal = devices.reduce(
       (sum, device) => sum + Number(device.total || 0),
       0
@@ -645,6 +752,9 @@ function renderUsers(users, total) {
               <span class="scope-badge ${scope.className}">${scope.label}</span>
               ${user.removed ? '<span class="removed-user-badge">用户已移除</span>' : ""}
               ${policyBadge(user.policy)}
+              ${hasPartiallyBlockedDevices
+                ? `<span class="quota-badge blocked" title="${blockedDeviceCount} 台设备当前被封禁">部分设备封禁</span>`
+                : ""}
             </div>
           </div>
           <div class="exit-user-actions">
@@ -772,7 +882,7 @@ function renderUsers(users, total) {
       const device = user?.device_items?.find(
         (item) => item.device_id === button.dataset.deviceId
       );
-      if (device) openDeviceAliasDialog(device);
+      if (device) openDeviceAliasDialog(device, user);
     });
   });
   list.querySelectorAll(".user-policy-inline-button").forEach((button) => {
@@ -944,19 +1054,24 @@ function openUserAliasDialog(user) {
     key: user.key,
   };
   $("#dialogTitle").textContent = `${user.name} · 修改备注`;
-  $("#aliasInput").value = user.name;
+  $("#aliasInput").value = String(user.name || "").trim();
   $("#aliasInput").placeholder = "例如：小林";
+  $("#saveAlias").disabled = false;
   $("#userDialog").showModal();
 }
 
-function openDeviceAliasDialog(device) {
+function openDeviceAliasDialog(device, user) {
+  const existingAlias = String(device.alias || "").trim();
+  const userAlias = String(user?.alias || user?.name || "").trim();
+  const suggestedAlias = userAlias ? `${userAlias.slice(0, 78)}'s` : "";
   state.selectedAliasTarget = {
     type: "device",
     key: device.device_id,
   };
   $("#dialogTitle").textContent = `${device.device_name} · 修改备注`;
-  $("#aliasInput").value = device.alias || "";
+  $("#aliasInput").value = existingAlias || suggestedAlias;
   $("#aliasInput").placeholder = "例如：小林的手机；留空恢复默认名称";
+  $("#saveAlias").disabled = false;
   $("#userDialog").showModal();
 }
 
@@ -1026,7 +1141,7 @@ async function loadWebsiteDetails() {
       : `当前按 ${payload.timezone || "面板设置"} 的自然日统计；访问时间按当前浏览器时区显示。`;
     $("#websiteTrackingNote").textContent = tracking.error
       ? tracking.error
-      : `${aggregationNote}${periodNote}域名由出口 DNS、HTTP Host 和 TLS SNI 尽力识别；Docker 转发访问显示为 docker://VPS地址:端口，QUIC/ECH 等流量可能只显示目标 IP。`;
+      : `${aggregationNote}${periodNote}`;
 
     const websites = payload.websites || [];
     const includeDate = payload.period === "24h";
@@ -1062,25 +1177,30 @@ function openWebsiteDetails(type, key, name) {
   loadWebsiteDetails();
 }
 
-function openPolicy(targetType, targetKey, targetName, policy) {
+function openPolicy(targetType, targetKey, targetName, policy, initialRule = null) {
   state.activePolicyTarget = {
     targetType,
     targetKey,
     targetName,
     policy,
   };
-  $("#policyTitle").textContent = targetType === "user"
-    ? `${targetName} · 用户规则`
-    : `${targetName} · 设备规则`;
+  const singleRuleMode = initialRule === "quota" || initialRule === "access";
+  const policyDialog = $("#policyDialog");
+  policyDialog.classList.toggle("single-rule-mode", singleRuleMode);
+  $("#policyTitle").textContent = singleRuleMode
+    ? `${targetName} · ${initialRule === "quota" ? "编辑流量上限" : "编辑手动封禁"}`
+    : targetType === "user"
+      ? `${targetName} · 用户规则`
+      : `${targetName} · 设备规则`;
   $("#policyUsage").textContent = formatBytes(policy?.usage_bytes || 0, true);
 
   const status = $("#policyStatus");
   status.className = "";
-  if (policy?.enabled === false) {
-    status.textContent = "规则已停用，可在规则页面重新启用";
+  if (!policy?.limit_bytes) {
+    status.textContent = "尚未设置流量上限封禁";
+  } else if (policy.quota_enabled === false) {
+    status.textContent = "流量上限封禁已停用，可在规则页面重新启用";
     status.classList.add("bypassed");
-  } else if (!policy?.limit_bytes) {
-    status.textContent = "尚未设置月度流量限额";
   } else if (policy.quota_blocked) {
     status.textContent = "已达到月度上限，当前已封锁";
     status.classList.add("blocked");
@@ -1088,7 +1208,7 @@ function openPolicy(targetType, targetKey, targetName, policy) {
     status.textContent = "本月已手动解锁，次月重新执行该规则";
     status.classList.add("bypassed");
   } else {
-    status.textContent = `规则生效中 · 上限 ${formatBytes(policy.limit_bytes, true)}`;
+    status.textContent = `监控中 · 上限 ${formatBytes(policy.limit_bytes, true)}`;
   }
 
   const limit = formatLimitInput(policy?.limit_bytes);
@@ -1099,31 +1219,41 @@ function openPolicy(targetType, targetKey, targetName, policy) {
   $("#policyEnforcementNote").textContent =
     "达到上限后将同时封锁该目标的 IPv4 和 IPv6；下月用量归零后自动解除。";
 
+  const accessExists = Boolean(policy?.access_exists);
+  const accessActive = Boolean(policy?.access_active);
   const accessBlocked = Boolean(policy?.manual_blocked);
-  const permanent = accessBlocked && policy.block_mode === "permanent";
+  const permanent = accessExists && policy.block_mode === "permanent";
   const accessStatus = $("#accessBlockStatus");
   accessStatus.className = accessBlocked ? "blocked" : "";
-  accessStatus.textContent = accessBlocked
-    ? (permanent ? "永久封禁中" : "临时封禁中")
-    : "未启用";
-  $("#accessBlockHint").textContent = permanent
-    ? "当前持续封禁，手动解除后恢复"
-    : accessBlocked
-      ? `封禁至 ${formatBlockUntil(policy.block_until)}`
-      : "选择封禁方式并应用规则";
+  accessStatus.textContent = !accessExists
+    ? "尚未设置"
+    : policy.access_enabled === false
+      ? "手动封禁已停用"
+      : !accessActive
+        ? "临时封禁已到期"
+        : permanent
+          ? "永久封禁中"
+          : "临时封禁中";
+  $("#accessBlockHint").textContent = !accessExists
+    ? "选择封禁方式并应用规则"
+    : policy.access_enabled === false
+      ? "可在规则页面单独重新启用"
+      : !accessActive
+        ? "编辑时长后可重新应用"
+        : permanent
+          ? "当前持续封禁，手动解除后恢复"
+          : `封禁至 ${formatBlockUntil(policy.block_until)}`;
 
   $("#blockDurationValue").value = "24";
   $("#blockDurationUnit").value = "hours";
-  $("#accessBlockPermanent").checked = permanent;
-  updateAccessBlockMode();
-  $("#removeAccessBlock").hidden = !accessBlocked;
-  const accessNote = targetType === "user"
-    ? "封禁用户会同时阻止其所有设备的 IPv4 和 IPv6 出口流量，并在下一轮采集时应用。"
-    : "封禁设备会同时阻止该设备的 IPv4 和 IPv6 出口流量，并在下一轮采集时应用。";
-  $("#accessBlockNote").textContent = accessNote;
+  $("#removeAccessBlock").hidden = !accessExists;
+  $("#accessBlockNote").textContent =
+    "封禁会同时阻止目标的 IPv4 和 IPv6 出口流量。";
 
-  selectPolicyRule(accessBlocked ? "access" : "quota");
-  $("#policyDialog").showModal();
+  selectAccessBlockMode(permanent ? "permanent" : "temporary");
+  const selectedPolicyRule = initialRule === "access" ? "manual" : initialRule;
+  selectPolicyRule(selectedPolicyRule || (accessExists ? "manual" : "quota"));
+  policyDialog.showModal();
 }
 
 async function policyError(response, fallback) {
@@ -1170,7 +1300,7 @@ async function savePolicy() {
       )
     );
     if (!response.ok) throw new Error(await policyError(response, "保存规则失败"));
-    await refreshAfterPolicyChange("流量限额已保存");
+    await refreshAfterPolicyChange("流量上限封禁已保存");
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -1191,7 +1321,7 @@ async function deletePolicy() {
       )
     );
     if (!response.ok) throw new Error(await policyError(response, "删除规则失败"));
-    await refreshAfterPolicyChange("流量限额已删除");
+    await refreshAfterPolicyChange("流量上限封禁已删除");
   } catch (error) {
     showToast(error.message);
   } finally {
@@ -1293,6 +1423,7 @@ async function removeAccessBlock(button) {
 async function saveAlias() {
   const target = state.selectedAliasTarget;
   if (!target) return;
+  const alias = $("#aliasInput").value.trim();
   const button = $("#saveAlias");
   button.disabled = true;
   try {
@@ -1302,13 +1433,14 @@ async function saveAlias() {
         {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ alias: $("#aliasInput").value.trim() }),
+        body: JSON.stringify({ alias }),
         }
       )
     );
     if (!response.ok) throw new Error("保存失败");
     showToast(target.type === "device" ? "设备备注已保存" : "用户备注已保存");
     $("#userDialog").close();
+    state.selectedAliasTarget = null;
     await loadDashboard();
   } catch (error) {
     showToast(error.message);
@@ -1370,14 +1502,34 @@ async function loadDashboard() {
 
 function setupDialogInteractions() {
   document.querySelectorAll("dialog").forEach((dialog) => {
-    dialog.addEventListener("click", (event) => {
-      if (event.target !== dialog) return;
+    let backdropPointerId = null;
+    const isBackdropPointer = (event) => {
+      if (event.target !== dialog) return false;
       const bounds = dialog.getBoundingClientRect();
       const inside = event.clientX >= bounds.left
         && event.clientX <= bounds.right
         && event.clientY >= bounds.top
         && event.clientY <= bounds.bottom;
-      if (!inside) dialog.close();
+      return !inside;
+    };
+
+    dialog.addEventListener("pointerdown", (event) => {
+      backdropPointerId = isBackdropPointer(event) ? event.pointerId : null;
+    });
+
+    dialog.addEventListener("pointerup", (event) => {
+      const completedBackdropClick = backdropPointerId === event.pointerId
+        && isBackdropPointer(event);
+      backdropPointerId = null;
+      if (completedBackdropClick) dialog.close();
+    });
+
+    dialog.addEventListener("pointercancel", () => {
+      backdropPointerId = null;
+    });
+
+    dialog.addEventListener("close", () => {
+      backdropPointerId = null;
     });
 
     dialog.addEventListener("keydown", (event) => {
@@ -1393,10 +1545,9 @@ function setupDialogInteractions() {
         return;
       }
 
-      if (dialog.id === "userDialog") {
-        event.preventDefault();
-        saveAlias();
-      } else if (dialog.id === "websiteDialog") {
+      if (dialog.id === "userDialog") return;
+
+      if (dialog.id === "websiteDialog") {
         event.preventDefault();
         loadWebsiteDetails();
       } else if (dialog.id === "policyDialog") {
@@ -1418,7 +1569,27 @@ $("#resetMonth").addEventListener("click", () => {
   loadDashboard();
 });
 $("#showExpiredDevices").addEventListener("change", loadDashboard);
-$("#saveAlias").addEventListener("click", saveAlias);
+$("#aliasForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (!$("#saveAlias").disabled) saveAlias();
+});
+$("#aliasInput").addEventListener("keydown", (event) => {
+  if (
+    event.key !== "Enter"
+    || event.isComposing
+    || event.ctrlKey
+    || event.altKey
+    || event.metaKey
+    || event.shiftKey
+  ) {
+    return;
+  }
+  event.preventDefault();
+  if (!$("#saveAlias").disabled) saveAlias();
+});
+$("#userDialog .close-button").addEventListener("click", () => {
+  $("#userDialog").close("cancel");
+});
 $("#websiteDay").addEventListener("change", () => {
   if (state.activeWebsitePeriod === "day") loadWebsiteDetails();
 });
@@ -1430,12 +1601,61 @@ document.querySelectorAll("[data-website-period]").forEach((button) => {
 $("#savePolicy").addEventListener("click", savePolicy);
 $("#deletePolicy").addEventListener("click", deletePolicy);
 $("#unlockPolicy").addEventListener("click", unlockPolicy);
-$("#policyRuleType").addEventListener("change", (event) => {
-  selectPolicyRule(event.target.value);
+const policyRuleButtons = [...document.querySelectorAll("[data-policy-rule]")];
+policyRuleButtons.forEach((button, index) => {
+  button.addEventListener("click", () => {
+    selectPolicyRule(button.dataset.policyRule);
+  });
+  button.addEventListener("keydown", (event) => {
+    const directions = {
+      ArrowLeft: -1,
+      ArrowUp: -1,
+      ArrowRight: 1,
+      ArrowDown: 1,
+    };
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      const target = event.key === "Home"
+        ? policyRuleButtons[0]
+        : policyRuleButtons.at(-1);
+      selectPolicyRule(target.dataset.policyRule);
+      target.focus();
+      return;
+    }
+    if (!directions[event.key]) return;
+    event.preventDefault();
+    const nextIndex = (index + directions[event.key] + policyRuleButtons.length)
+      % policyRuleButtons.length;
+    const target = policyRuleButtons[nextIndex];
+    selectPolicyRule(target.dataset.policyRule);
+    target.focus();
+  });
 });
-$("#accessBlockPermanent").addEventListener("change", updateAccessBlockMode);
+const accessBlockModeButtons = [
+  ...document.querySelectorAll("[data-access-block-mode]"),
+];
+accessBlockModeButtons.forEach((button, index) => {
+  button.addEventListener("click", () => {
+    selectAccessBlockMode(button.dataset.accessBlockMode);
+  });
+  button.addEventListener("keydown", (event) => {
+    const direction = event.key === "ArrowLeft" || event.key === "ArrowUp"
+      ? -1
+      : event.key === "ArrowRight" || event.key === "ArrowDown"
+        ? 1
+        : 0;
+    if (!direction) return;
+    event.preventDefault();
+    const target = accessBlockModeButtons[
+      (index + direction + accessBlockModeButtons.length)
+        % accessBlockModeButtons.length
+    ];
+    selectAccessBlockMode(target.dataset.accessBlockMode);
+    target.focus();
+  });
+});
 $("#saveAccessBlock").addEventListener("click", () => {
-  setAccessBlock($("#accessBlockPermanent").checked);
+  setAccessBlock(state.activeAccessBlockMode === "permanent");
 });
 $("#removeAccessBlock").addEventListener("click", (event) => {
   removeAccessBlock(event.currentTarget);

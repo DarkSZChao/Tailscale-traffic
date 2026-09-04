@@ -182,7 +182,7 @@ class PolicyEnabledUpdate(BaseModel):
 
 def validate_target_type(target_type: str) -> None:
     if target_type not in {"user", "device"}:
-        raise HTTPException(status_code=404, detail="不支持的限额目标")
+        raise HTTPException(status_code=404, detail="不支持的规则目标")
 
 
 @app.get("/healthz")
@@ -343,6 +343,27 @@ async def update_policy_enabled(
     validate_target_type(target_type)
     policy = database.set_policy_enabled(
         target_type, target_key, update.enabled
+    )
+    if policy is None:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return {"policy": policy}
+
+
+@app.put("/api/policies/{target_type}/{target_key}/{rule_type}/enabled")
+async def update_individual_policy_enabled(
+    target_type: str,
+    target_key: str,
+    rule_type: str,
+    update: PolicyEnabledUpdate,
+):
+    validate_target_type(target_type)
+    if rule_type not in {"quota", "access"}:
+        raise HTTPException(status_code=404, detail="不支持的规则类型")
+    policy = database.set_rule_enabled(
+        target_type,
+        target_key,
+        rule_type,
+        update.enabled,
     )
     if policy is None:
         raise HTTPException(status_code=404, detail="规则不存在")

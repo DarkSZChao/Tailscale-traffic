@@ -176,10 +176,12 @@ class Database:
                     target_key TEXT NOT NULL,
                     monthly_limit_bytes INTEGER NOT NULL,
                     bypass_month TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (target_type, target_key),
                     CHECK (target_type IN ('user', 'device')),
-                    CHECK (monthly_limit_bytes > 0)
+                    CHECK (monthly_limit_bytes > 0),
+                    CHECK (enabled IN (0, 1))
                 );
 
                 CREATE TABLE IF NOT EXISTS access_blocks (
@@ -187,10 +189,12 @@ class Database:
                     target_key TEXT NOT NULL,
                     block_mode TEXT NOT NULL,
                     blocked_until TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (target_type, target_key),
                     CHECK (target_type IN ('user', 'device')),
-                    CHECK (block_mode IN ('temporary', 'permanent'))
+                    CHECK (block_mode IN ('temporary', 'permanent')),
+                    CHECK (enabled IN (0, 1))
                 );
 
                 CREATE TABLE IF NOT EXISTS policy_states (
@@ -274,6 +278,52 @@ class Database:
                     """
                     ALTER TABLE devices
                     ADD COLUMN expired INTEGER NOT NULL DEFAULT 0
+                    """
+                )
+            quota_columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(quota_rules)").fetchall()
+            }
+            quota_enabled_added = "enabled" not in quota_columns
+            if quota_enabled_added:
+                db.execute(
+                    """
+                    ALTER TABLE quota_rules
+                    ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1
+                    """
+                )
+                db.execute(
+                    """
+                    UPDATE quota_rules
+                    SET enabled = COALESCE(
+                        (SELECT enabled FROM policy_states
+                         WHERE policy_states.target_type = quota_rules.target_type
+                           AND policy_states.target_key = quota_rules.target_key),
+                        1
+                    )
+                    """
+                )
+            access_columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(access_blocks)").fetchall()
+            }
+            access_enabled_added = "enabled" not in access_columns
+            if access_enabled_added:
+                db.execute(
+                    """
+                    ALTER TABLE access_blocks
+                    ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1
+                    """
+                )
+                db.execute(
+                    """
+                    UPDATE access_blocks
+                    SET enabled = COALESCE(
+                        (SELECT enabled FROM policy_states
+                         WHERE policy_states.target_type = access_blocks.target_type
+                           AND policy_states.target_key = access_blocks.target_key),
+                        1
+                    )
                     """
                 )
         if not os.path.exists(self.config_path):
@@ -1459,19 +1509,6 @@ class Database:
         return bool(row and row["is_present"])
 
     @staticmethod
-    def _policy_enabled(
-        db: sqlite3.Connection, target_type: str, target_key: str
-    ) -> bool:
-        row = db.execute(
-            """
-            SELECT enabled FROM policy_states
-            WHERE target_type = ? AND target_key = ?
-            """,
-            (target_type, target_key),
-        ).fetchone()
-        return True if row is None else bool(row["enabled"])
-
-    @staticmethod
     def _policy_exists(
         db: sqlite3.Connection, target_type: str, target_key: str
     ) -> bool:
@@ -1512,7 +1549,7 @@ class Database:
                 return None
             rule = db.execute(
                 """
-                SELECT monthly_limit_bytes, bypass_month
+                SELECT monthly_limit_bytes, bypass_month, enabled
                 FROM quota_rules
                 WHERE target_type = ? AND target_key = ?
                 """,
@@ -1520,7 +1557,7 @@ class Database:
             ).fetchone()
             access_block = db.execute(
                 """
-                SELECT block_mode, blocked_until
+                SELECT block_mode, blocked_until, enabled
                 FROM access_blocks
                 WHERE target_type = ? AND target_key = ?
                 """,
@@ -1536,42 +1573,58 @@ class Database:
             target_present = self._target_present(
                 db, target_type, target_key
             )
-            enabled = self._policy_enabled(db, target_type, target_key)
 
         limit = int(rule["monthly_limit_bytes"]) if rule else None
+        quota_enabled = bool(rule and rule["enabled"])
+        access_enabled = bool(access_block and access_block["enabled"])
         exceeded = bool(limit is not None and usage >= limit)
         bypassed = bool(
             rule and exceeded and rule["bypass_month"] == current_month
         )
-        quota_blocked = exceeded and not bypassed
-        manual_blocked = self._access_block_active(
+        quota_triggered = exceeded and not bypassed
+        access_active = self._access_block_active(
             access_block,
             self._local_now(),
         )
+        quota_blocked = bool(
+            quota_enabled and target_present and quota_triggered
+        )
+        manual_blocked = bool(
+            access_enabled and target_present and access_active
+        )
+        enabled_values = [
+            enabled
+            for exists, enabled in (
+                (rule is not None, quota_enabled),
+                (access_block is not None, access_enabled),
+            )
+            if exists
+        ]
         return {
             "target_type": target_type,
             "target_key": target_key,
+            "quota_exists": rule is not None,
             "limit_bytes": limit,
             "usage_bytes": usage,
             "exceeded": exceeded,
             "bypassed": bypassed,
+            "quota_enabled": quota_enabled,
             "quota_blocked": quota_blocked,
+            "access_exists": access_block is not None,
+            "access_enabled": access_enabled,
+            "access_active": access_active,
             "manual_blocked": manual_blocked,
             "block_mode": (
-                str(access_block["block_mode"]) if manual_blocked else None
+                str(access_block["block_mode"]) if access_block else None
             ),
             "block_until": (
                 str(access_block["blocked_until"])
-                if manual_blocked and access_block["block_mode"] == "temporary"
+                if access_block and access_block["block_mode"] == "temporary"
                 else None
             ),
-            "blocked": bool(
-                enabled
-                and target_present
-                and (quota_blocked or manual_blocked)
-            ),
-            "enabled": enabled,
-            "effective": bool(enabled and target_present),
+            "blocked": bool(quota_blocked or manual_blocked),
+            "enabled": all(enabled_values) if enabled_values else True,
+            "effective": bool(target_present and any(enabled_values)),
             "target_removed": not target_present,
             "month": current_month,
         }
@@ -1692,6 +1745,21 @@ class Database:
         with self.connect() as db:
             if not self._policy_exists(db, target_type, target_key):
                 return None
+            now = self._now()
+            db.execute(
+                """
+                UPDATE quota_rules SET enabled = ?, updated_at = ?
+                WHERE target_type = ? AND target_key = ?
+                """,
+                (int(enabled), now, target_type, target_key),
+            )
+            db.execute(
+                """
+                UPDATE access_blocks SET enabled = ?, updated_at = ?
+                WHERE target_type = ? AND target_key = ?
+                """,
+                (int(enabled), now, target_type, target_key),
+            )
             db.execute(
                 """
                 INSERT INTO policy_states
@@ -1701,8 +1769,33 @@ class Database:
                     enabled = excluded.enabled,
                     updated_at = excluded.updated_at
                 """,
-                (target_type, target_key, int(enabled), self._now()),
+                (target_type, target_key, int(enabled), now),
             )
+        return self.quota_state(target_type, target_key)
+
+    def set_rule_enabled(
+        self,
+        target_type: str,
+        target_key: str,
+        rule_type: str,
+        enabled: bool,
+    ) -> dict | None:
+        table = {
+            "quota": "quota_rules",
+            "access": "access_blocks",
+        }.get(rule_type)
+        if table is None:
+            raise ValueError("不支持的规则类型")
+        with self.connect() as db:
+            result = db.execute(
+                f"""
+                UPDATE {table} SET enabled = ?, updated_at = ?
+                WHERE target_type = ? AND target_key = ?
+                """,
+                (int(enabled), self._now(), target_type, target_key),
+            )
+            if not result.rowcount:
+                return None
         return self.quota_state(target_type, target_key)
 
     def delete_policy_bundle(
@@ -1756,14 +1849,13 @@ class Database:
         with self.connect() as db:
             rules = db.execute(
                 """
-                SELECT target_type, target_key, monthly_limit_bytes, bypass_month
+                SELECT target_type, target_key, monthly_limit_bytes,
+                       bypass_month, enabled
                 FROM quota_rules
                 """
             ).fetchall()
             for rule in rules:
-                if not self._policy_enabled(
-                    db, rule["target_type"], rule["target_key"]
-                ):
+                if not rule["enabled"]:
                     continue
                 if not self._target_present(
                     db, rule["target_type"], rule["target_key"]
@@ -1794,16 +1886,13 @@ class Database:
                 blocked.update(row["ip"] for row in rows)
             access_blocks = db.execute(
                 """
-                SELECT target_type, target_key, block_mode, blocked_until
+                SELECT target_type, target_key, block_mode,
+                       blocked_until, enabled
                 FROM access_blocks
                 """
             ).fetchall()
             for access_block in access_blocks:
-                if not self._policy_enabled(
-                    db,
-                    access_block["target_type"],
-                    access_block["target_key"],
-                ):
+                if not access_block["enabled"]:
                     continue
                 if not self._target_present(
                     db,
@@ -1917,7 +2006,7 @@ class Database:
             )
             if not state:
                 continue
-            if state["limit_bytes"] is None and not state["manual_blocked"]:
+            if state["limit_bytes"] is None and not state["access_exists"]:
                 continue
             result.append({**target, "policy": state})
         result.sort(
@@ -1944,6 +2033,7 @@ class Database:
                     i.identity_key,
                     COALESCE(NULLIF(i.alias, ''), NULLIF(i.display_name, ''),
                              NULLIF(i.login_name, ''), i.identity_key) AS name,
+                    i.alias,
                     i.login_name,
                     i.network_scope,
                     i.is_present,
@@ -2037,6 +2127,7 @@ class Database:
                 {
                     "key": row["identity_key"],
                     "name": row["name"],
+                    "alias": row["alias"],
                     "login_name": row["login_name"],
                     "network_scope": network_scope,
                     "removed": not bool(row["is_present"]),
@@ -2257,8 +2348,8 @@ class Database:
             try:
                 suffix = int(str(ipv4 or "").rsplit(".", 1)[-1])
             except ValueError:
-                return "SHARED-DEVICE"
-            return f"SHARED-DEVICE-{suffix:03d}"
+                return "DEVICE"
+            return f"DEVICE-{suffix:03d}"
         return (raw_name or str(ipv4 or "") or "未知设备").upper()
 
     def set_device_alias(self, device_id: str, alias: str) -> bool:

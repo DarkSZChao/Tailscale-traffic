@@ -136,6 +136,56 @@ class DatabaseTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_legacy_policy_switch_migrates_to_each_rule(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy.db"
+        with sqlite3.connect(legacy_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE quota_rules (
+                    target_type TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    monthly_limit_bytes INTEGER NOT NULL,
+                    bypass_month TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (target_type, target_key)
+                );
+                CREATE TABLE access_blocks (
+                    target_type TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    block_mode TEXT NOT NULL,
+                    blocked_until TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (target_type, target_key)
+                );
+                CREATE TABLE policy_states (
+                    target_type TEXT NOT NULL,
+                    target_key TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (target_type, target_key)
+                );
+                INSERT INTO quota_rules VALUES
+                    ('user', 'legacy-user', 1000, '', '2026-01-01');
+                INSERT INTO access_blocks VALUES
+                    ('user', 'legacy-user', 'permanent', '', '2026-01-01');
+                INSERT INTO policy_states VALUES
+                    ('user', 'legacy-user', 0, '2026-01-01');
+                """
+            )
+
+        migrated = Database(str(legacy_path))
+        with migrated.connect() as connection:
+            quota_enabled = connection.execute(
+                "SELECT enabled FROM quota_rules WHERE target_key = ?",
+                ("legacy-user",),
+            ).fetchone()["enabled"]
+            access_enabled = connection.execute(
+                "SELECT enabled FROM access_blocks WHERE target_key = ?",
+                ("legacy-user",),
+            ).fetchone()["enabled"]
+        self.assertEqual(quota_enabled, 0)
+        self.assertEqual(access_enabled, 0)
+
     def test_app_config_and_password_are_persisted(self):
         updated = AppConfig(
             monthly_quota_gb=2500,
@@ -325,6 +375,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(self.db.set_alias(key, "小林"))
         dashboard = self.db.dashboard(None, 10_000)
         self.assertEqual(dashboard["users"][0]["name"], "小林")
+        self.assertEqual(dashboard["users"][0]["alias"], "小林")
 
     def test_unknown_usage_moves_when_whois_resolves_identity(self):
         address = "100.64.1.4"
@@ -416,7 +467,7 @@ class DatabaseTests(unittest.TestCase):
             ]
         )
         devices = self.db.devices_for("user:shared")
-        self.assertEqual(devices[0]["device_name"], "SHARED-DEVICE-021")
+        self.assertEqual(devices[0]["device_name"], "DEVICE-021")
         self.assertEqual(devices[0]["alias"], "")
 
         self.assertTrue(self.db.set_device_alias("node-shared", "朋友的手机"))
@@ -431,7 +482,7 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertTrue(reopened.set_device_alias("node-shared", ""))
         restored = reopened.devices_for("user:shared")
-        self.assertEqual(restored[0]["device_name"], "SHARED-DEVICE-021")
+        self.assertEqual(restored[0]["device_name"], "DEVICE-021")
         self.assertFalse(reopened.set_device_alias("missing-device", "备注"))
 
     def test_devices_are_sorted_by_usage_before_online_state_and_name(self):
@@ -1109,6 +1160,28 @@ class DatabaseTests(unittest.TestCase):
         )
         self.db.set_quota_rule("user", "user:toggle-rule", 500)
         self.db.set_access_block("user", "user:toggle-rule")
+
+        quota_disabled = self.db.set_rule_enabled(
+            "user", "user:toggle-rule", "quota", False
+        )
+        self.assertFalse(quota_disabled["quota_enabled"])
+        self.assertTrue(quota_disabled["access_enabled"])
+        self.assertTrue(quota_disabled["manual_blocked"])
+        self.assertEqual(self.db.blocked_addresses(), {"100.64.2.10"})
+
+        access_disabled = self.db.set_rule_enabled(
+            "user", "user:toggle-rule", "access", False
+        )
+        self.assertFalse(access_disabled["access_enabled"])
+        self.assertFalse(access_disabled["blocked"])
+        self.assertEqual(self.db.blocked_addresses(), set())
+
+        quota_enabled = self.db.set_rule_enabled(
+            "user", "user:toggle-rule", "quota", True
+        )
+        self.assertTrue(quota_enabled["quota_enabled"])
+        self.assertTrue(quota_enabled["quota_blocked"])
+        self.assertTrue(quota_enabled["blocked"])
 
         disabled = self.db.set_policy_enabled(
             "user", "user:toggle-rule", False

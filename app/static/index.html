@@ -166,7 +166,7 @@
             <div id="rulesEmpty" class="rules-empty" hidden>
               <span class="empty-icon" aria-hidden="true">＋</span>
               <b>还没有设置规则</b>
-              <span>前往“出口控制”页面，为用户或设备设置流量限额、临时封禁或永久封禁。</span>
+              <span>前往“出口控制”页面，为用户或设备设置流量上限封禁或手动封禁。</span>
               <a href="#users">前往出口控制</a>
             </div>
           </section>
@@ -303,19 +303,19 @@
   </div>
 
   <dialog id="userDialog">
-    <form method="dialog" class="dialog-card">
+    <form id="aliasForm" method="dialog" class="dialog-card">
       <div class="dialog-header">
         <div>
           <p class="section-kicker">IDENTITY</p>
           <h2 id="dialogTitle">账号详情</h2>
         </div>
-        <button class="close-button" value="cancel" aria-label="关闭">×</button>
+        <button type="button" class="close-button" aria-label="关闭">×</button>
       </div>
       <label class="alias-field">
         <span>备注名</span>
         <div>
           <input id="aliasInput" maxlength="80" placeholder="例如：小林">
-          <button id="saveAlias" type="button">保存</button>
+          <button id="saveAlias" type="submit">保存</button>
         </div>
       </label>
     </form>
@@ -370,16 +370,20 @@
         <button class="close-button" value="cancel" aria-label="关闭规则设置">×</button>
       </div>
 
-      <label class="policy-rule-picker">
-        <span>规则类型</span>
-        <select id="policyRuleType">
-          <option value="quota">流量上限封禁</option>
-          <option value="access">手动封禁</option>
-        </select>
-      </label>
+      <div class="policy-rule-picker">
+        <span id="policyRulePickerLabel">规则类型</span>
+        <div class="policy-rule-options" role="radiogroup" aria-labelledby="policyRulePickerLabel">
+          <button type="button" class="policy-rule-option" data-policy-rule="quota" role="radio" aria-checked="true">
+            <b>流量上限</b>
+          </button>
+          <button type="button" class="policy-rule-option" data-policy-rule="manual" role="radio" aria-checked="false">
+            <b>手动封禁</b>
+          </button>
+        </div>
+      </div>
 
       <div class="policy-rule-panels">
-        <section class="policy-rule-panel" data-policy-rule-panel="quota">
+        <section class="policy-rule-panel active" data-policy-rule-panel="quota" aria-hidden="false">
           <div class="policy-current">
             <span>本月已用</span>
             <strong id="policyUsage">—</strong>
@@ -397,25 +401,26 @@
           </label>
           <p id="policyEnforcementNote" class="policy-note"></p>
           <div class="policy-actions">
-            <button id="savePolicy" type="button" class="primary-action">保存流量上限</button>
+            <button id="savePolicy" type="button" class="primary-action">应用流量上限</button>
             <button id="unlockPolicy" type="button">本月手动解锁</button>
             <button id="deletePolicy" type="button" class="danger-action">删除流量上限</button>
           </div>
         </section>
 
-        <section class="policy-rule-panel" data-policy-rule-panel="access" hidden>
+        <section class="policy-rule-panel" data-policy-rule-panel="access" aria-hidden="true" inert>
           <div class="policy-current">
             <span>手动封禁</span>
             <strong id="accessBlockStatus">未启用</strong>
             <small id="accessBlockHint">选择封禁方式并应用规则</small>
           </div>
-          <label class="policy-access-permanent-toggle">
-            <input id="accessBlockPermanent" type="checkbox">
-            <span>
-              <b>永久封禁</b>
-              <small>选中后持续封禁，直到手动解除</small>
-            </span>
-          </label>
+          <div class="access-block-mode-picker">
+            <span id="accessBlockModeLabel">封禁方式</span>
+            <div class="access-block-mode-options" role="radiogroup" aria-labelledby="accessBlockModeLabel">
+              <button type="button" class="access-block-mode-option active" data-access-block-mode="temporary" role="radio" aria-checked="true">临时封禁</button>
+              <button type="button" class="access-block-mode-option" data-access-block-mode="permanent" role="radio" aria-checked="false">永久封禁</button>
+            </div>
+          </div>
+          <p id="accessBlockNote" class="policy-note"></p>
           <label id="accessBlockDurationField" class="policy-limit-field">
             <span>封禁时长</span>
             <div>
@@ -427,10 +432,9 @@
               </select>
             </div>
           </label>
-          <p id="accessBlockNote" class="policy-note"></p>
           <div class="policy-actions">
-            <button id="saveAccessBlock" type="button" class="primary-action">应用临时封禁</button>
-            <button id="removeAccessBlock" type="button">解除手动封禁</button>
+            <button id="saveAccessBlock" type="button" class="manual-action">应用临时封禁</button>
+            <button id="removeAccessBlock" type="button" class="danger-action">解除手动封禁</button>
           </div>
         </section>
       </div>
