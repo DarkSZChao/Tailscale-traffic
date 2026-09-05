@@ -204,21 +204,86 @@ function formatBlockUntil(value) {
   });
 }
 
-function policyBadge(policy) {
+function hasQuotaRule(policy) {
+  return Boolean(policy && (policy.quota_exists || policy.limit_bytes));
+}
+
+function hasAccessRule(policy) {
+  return Boolean(policy?.access_exists);
+}
+
+function hasPolicyRule(policy) {
+  return hasQuotaRule(policy) || hasAccessRule(policy);
+}
+
+function ruleBadge(label, className = "", title = "") {
+  const classes = `quota-badge${className ? ` ${className}` : ""}`;
+  const titleAttribute = title ? ` title="${escapeHtml(title)}"` : "";
+  return `<span class="${classes}"${titleAttribute}>${label}</span>`;
+}
+
+function policyBadges(policy) {
   if (!policy) return "";
-  if (policy.manual_blocked) {
-    const label = policy.block_mode === "permanent" ? "永久封禁" : "临时封禁";
-    return `<span class="quota-badge blocked">${label}</span>`;
+  const badges = [];
+  if (hasQuotaRule(policy)) {
+    if (policy.quota_enabled === false) {
+      badges.push(ruleBadge("限额未启用", "disabled-rule"));
+    } else if (policy.quota_blocked) {
+      badges.push(ruleBadge("流量封禁", "blocked"));
+    } else if (policy.bypassed) {
+      badges.push(ruleBadge("本月已解锁", "bypassed"));
+    } else {
+      badges.push(ruleBadge("有限额"));
+    }
   }
-  if (policy.quota_blocked) {
-    return '<span class="quota-badge blocked">已封锁</span>';
+  if (hasAccessRule(policy)) {
+    if (policy.access_enabled === false) {
+      badges.push(ruleBadge("封禁未启用", "disabled-rule"));
+    } else if (policy.access_active) {
+      const label = policy.block_mode === "permanent" ? "永久封禁" : "临时封禁";
+      badges.push(ruleBadge(label, "blocked"));
+    } else {
+      badges.push(ruleBadge("封禁已到期"));
+    }
   }
-  if (policy.quota_enabled && policy.bypassed) {
-    return '<span class="quota-badge bypassed">本月已解锁</span>';
+  return badges.join("");
+}
+
+function partialDevicePolicyBadges(userPolicy, devices) {
+  const badges = [];
+  if (!hasQuotaRule(userPolicy)) {
+    const quotaPolicies = devices
+      .map((device) => device.policy)
+      .filter(hasQuotaRule);
+    if (quotaPolicies.length) {
+      const title = `${quotaPolicies.length} 台设备设有流量上限规则`;
+      if (quotaPolicies.some((policy) => policy.quota_blocked)) {
+        badges.push(ruleBadge("部分设备流量封禁", "blocked", title));
+      } else if (quotaPolicies.some((policy) => policy.quota_enabled !== false)) {
+        badges.push(ruleBadge("部分设备有限额", "", title));
+      } else {
+        badges.push(ruleBadge("部分设备限额未启用", "disabled-rule", title));
+      }
+    }
   }
-  return policy.quota_enabled && policy.limit_bytes
-    ? '<span class="quota-badge">有限额</span>'
-    : "";
+  if (!hasAccessRule(userPolicy)) {
+    const accessPolicies = devices
+      .map((device) => device.policy)
+      .filter(hasAccessRule);
+    if (accessPolicies.length) {
+      const title = `${accessPolicies.length} 台设备设有手动封禁规则`;
+      if (accessPolicies.some(
+        (policy) => policy.access_enabled !== false && policy.access_active
+      )) {
+        badges.push(ruleBadge("部分设备封禁", "blocked", title));
+      } else if (accessPolicies.some((policy) => policy.access_enabled !== false)) {
+        badges.push(ruleBadge("部分设备封禁已到期", "", title));
+      } else {
+        badges.push(ruleBadge("部分设备封禁未启用", "disabled-rule", title));
+      }
+    }
+  }
+  return badges.join("");
 }
 
 function policySummary(policy) {
@@ -717,11 +782,6 @@ function renderUsers(users, total) {
         ? { label: "外部分享", className: "external" }
         : { label: "未识别", className: "unknown" };
     const devices = user.device_items || [];
-    const blockedDeviceCount = devices.filter(
-      (device) => Boolean(device.policy?.blocked)
-    ).length;
-    const hasPartiallyBlockedDevices = blockedDeviceCount > 0
-      && !user.policy?.blocked;
     const deviceTotal = devices.reduce(
       (sum, device) => sum + Number(device.total || 0),
       0
@@ -751,10 +811,8 @@ function renderUsers(users, total) {
               <span class="device-count"><i class="online-dot ${user.online ? "on" : ""}"></i>${devices.length} 台设备</span>
               <span class="scope-badge ${scope.className}">${scope.label}</span>
               ${user.removed ? '<span class="removed-user-badge">用户已移除</span>' : ""}
-              ${policyBadge(user.policy)}
-              ${hasPartiallyBlockedDevices
-                ? `<span class="quota-badge blocked" title="${blockedDeviceCount} 台设备当前被封禁">部分设备封禁</span>`
-                : ""}
+              ${policyBadges(user.policy)}
+              ${partialDevicePolicyBadges(user.policy, devices)}
             </div>
           </div>
           <div class="exit-user-actions">
@@ -770,7 +828,7 @@ function renderUsers(users, total) {
             >修改备注</button>
             <button
               type="button"
-              class="user-policy-inline-button ${user.policy?.blocked ? "blocked" : ""}"
+              class="user-policy-inline-button ${hasPolicyRule(user.policy) ? "has-rule" : ""}"
               data-user-key="${escapeHtml(user.key)}"
               title="${escapeHtml(policySummary(user.policy))}"
             >设置规则</button>
@@ -811,6 +869,7 @@ function renderUsers(users, total) {
                     <b><i class="online-dot ${device.online ? "on" : ""}"></i>${escapeHtml(device.device_name || "未知设备")}</b>
                     ${device.expired ? '<span class="expired-device-badge">Expired</span>' : ""}
                     <span class="device-os-badge">${escapeHtml(device.os_name || "未知系统")}</span>
+                    ${policyBadges(device.policy)}
                   </div>
                   <div class="inline-device-addresses">
                     ${(device.addresses || []).map((address) => `
@@ -838,7 +897,7 @@ function renderUsers(users, total) {
                   >修改备注</button>
                   <button
                     type="button"
-                    class="inline-device-policy-button ${device.policy?.blocked ? "blocked" : ""}"
+                    class="inline-device-policy-button ${hasPolicyRule(device.policy) ? "has-rule" : ""}"
                     data-user-key="${escapeHtml(user.key)}"
                     data-device-id="${escapeHtml(device.device_id)}"
                     title="${escapeHtml(policySummary(device.policy))}"

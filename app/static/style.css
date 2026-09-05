@@ -852,8 +852,8 @@ h2 {
   white-space: nowrap;
 }
 
-.user-policy-inline-button.blocked,
-.inline-device-policy-button.blocked {
+.user-policy-inline-button.has-rule,
+.inline-device-policy-button.has-rule {
   color: var(--danger);
   border-color: rgba(255, 94, 94, 0.3);
   background: rgba(255, 94, 94, 0.07);
@@ -881,10 +881,10 @@ h2 {
   box-shadow: 0 0 0 2px rgba(199, 243, 107, 0.08);
 }
 
-.user-policy-inline-button:not(.blocked):hover,
-.inline-device-policy-button:not(.blocked):hover,
-.user-policy-inline-button:not(.blocked):focus-visible,
-.inline-device-policy-button:not(.blocked):focus-visible {
+.user-policy-inline-button:not(.has-rule):hover,
+.inline-device-policy-button:not(.has-rule):hover,
+.user-policy-inline-button:not(.has-rule):focus-visible,
+.inline-device-policy-button:not(.has-rule):focus-visible {
   color: var(--mint);
   border-color: rgba(112, 220, 194, 0.55);
   outline: none;
@@ -892,10 +892,10 @@ h2 {
   box-shadow: 0 0 0 2px rgba(112, 220, 194, 0.08);
 }
 
-.user-policy-inline-button.blocked:hover,
-.inline-device-policy-button.blocked:hover,
-.user-policy-inline-button.blocked:focus-visible,
-.inline-device-policy-button.blocked:focus-visible {
+.user-policy-inline-button.has-rule:hover,
+.inline-device-policy-button.has-rule:hover,
+.user-policy-inline-button.has-rule:focus-visible,
+.inline-device-policy-button.has-rule:focus-visible {
   color: var(--danger);
   border-color: rgba(255, 94, 94, 0.55);
   outline: none;
@@ -1029,6 +1029,7 @@ h2 {
   min-width: 0;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 9px;
 }
 
@@ -1249,6 +1250,14 @@ tbody tr[data-key]:hover {
 .quota-badge.bypassed {
   color: var(--lime);
   border-color: rgba(199, 243, 107, 0.28);
+}
+
+.quota-badge.disabled-rule,
+.inline-device-title .quota-badge.disabled-rule {
+  color: var(--orange);
+  border-color: rgba(255, 149, 111, 0.3);
+  background: rgba(255, 149, 111, 0.08);
+  text-transform: none;
 }
 
 .online-dot {
