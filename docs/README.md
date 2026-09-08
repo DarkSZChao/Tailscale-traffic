@@ -6,7 +6,6 @@ A lightweight traffic dashboard for a Tailscale Linux exit node. It tracks uploa
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)
-![License](https://img.shields.io/badge/License-MIT-c7f36b)
 
 ## Why this project
 
@@ -22,6 +21,8 @@ Tailscale Traffic Dashboard does not depend on paid APIs. It automatically disco
 - Persist daily data in SQLite and summarize usage by calendar month;
 - Configure a monthly traffic allowance and view a projected end-of-month total;
 - Assign custom account aliases from the dashboard;
+- Use revocable browser sessions, optionally remember a device for 30 days, and manage signed-in devices;
+- Review bounded login, configuration, policy, and collector-status audit logs;
 - Make a best-effort attempt to identify domains from exit-node DNS, HTTP Host headers, and TLS SNI;
 - Store only daily aggregates by domain or destination IP for website details, without retaining URLs, request contents, or individual connections.
 
@@ -86,7 +87,7 @@ sudo ufw allow in on tailscale0 to any port 4656 proto tcp
 ```
 
 The first time you open the dashboard, you will be prompted to set a password. No username is required, and `.env` is no longer used.
-Only a secure password hash is stored in `traffic.db`. You can later change the password on the Settings page; doing so automatically invalidates sessions in other browsers.
+Only a secure password hash and hashed session tokens are stored in `traffic.db`. By default, login lasts for the current browser session. Select “Remember this device” to keep it for 30 days. The Settings page can revoke one device, sign out every device, or change the password; changing the password invalidates every other session.
 
 Do not expose the unencrypted port 4656 directly to the public internet. Plain HTTP does not encrypt the password submitted during login. When you access the dashboard through a Tailscale IP, the connection is encrypted by Tailscale.
 
@@ -97,7 +98,7 @@ docker compose ps
 docker compose logs -f --tail=100
 ```
 
-When everything is working, the upper-right corner of the page shows “Collector healthy.” After the first startup, traffic can only be recorded from the point when the application creates its counting rules; earlier traffic cannot be recovered.
+When everything is working, the sidebar shows “Collector healthy,” its uptime, the latest update time, and the project version. After the first startup, traffic can only be recorded from the point when the application creates its counting rules; earlier traffic cannot be recovered.
 
 If the page reports a collector error, check the following first:
 
@@ -113,7 +114,8 @@ Persistent files are stored at:
 
 ```text
 ./config.yaml        # Non-sensitive runtime settings
-./data/traffic.db    # Traffic data, password hash, and session secret
+./data/traffic.db    # Traffic data, rules, password hash, and sessions
+./data/log.db        # Login, operation, and collector-status audit logs
 ```
 
 The collector and dashboard use file locking to safely read and write `config.yaml`, so neither process will read a partially written configuration. Traffic and authentication data are shared through SQLite WAL. Before making a backup, stop the services and copy both the entire `data` directory and the configuration file from the repository root:
@@ -140,8 +142,8 @@ docker compose up -d --build dashboard
 
 Stopping the containers does not delete data, and the counting chains on the host remain in place. After the collector restarts, it continues calculating differences from the existing counters. If a host reboot resets the counters to zero, the application automatically continues accumulating from the new values. Changes to limits made in the dashboard are applied on the collector's next cycle, normally within about 10 seconds.
 
-The monthly traffic allowance, collection interval, website-record retention period, and reporting time zone are managed on the Settings page and stored in `./config.yaml`. Website-detail collection is always enabled.
-The collector automatically reloads updated settings. The password hash and session secret remain exclusively in `traffic.db`. When upgrading from an older version, runtime settings stored in the database are automatically migrated to YAML, after which the old configuration table is removed.
+The monthly traffic allowance, collection interval, website-record retention period, and reporting time zone are managed on the Settings page and stored in `./config.yaml`. The reporting time zone defaults to UTC and can be changed when calendar-day aggregation should follow another locale. Website-detail collection is always enabled.
+The collector automatically reloads updated settings. Authentication data remains exclusively in `traffic.db`. Audit logs use a separate SQLite WAL database at `data/log.db`; timestamps are stored in UTC and displayed in the browser's local time zone. The audit table retains at most 5,000 entries and can be searched, filtered by UTC date, refreshed, or cleared from the Logs page. On the first upgraded start, audit entries created by the earlier combined-database version are copied to `log.db` before the old table is removed from `traffic.db`. When upgrading from an older version, runtime settings stored in the database are automatically migrated to YAML, after which the old configuration table is removed.
 
 Website details are retained for 180 days by default and aggregated by date, device, and domain. URLs, request paths, and individual connections are not stored.
 

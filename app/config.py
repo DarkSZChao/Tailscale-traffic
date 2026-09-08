@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 DATABASE_PATH = "/data/traffic.db"
+LOG_DATABASE_PATH = "/data/log.db"
 CONFIG_PATH = "/config.yaml"
 TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock"
 TAILSCALE_INTERFACE = "tailscale0"
@@ -20,7 +21,7 @@ class AppConfig:
     monthly_quota_gb: float = 3000
     collect_interval: int = 10
     website_retention_days: int = 180
-    timezone: str = "America/Los_Angeles"
+    timezone: str = "UTC"
 
     @property
     def monthly_quota_bytes(self) -> int:

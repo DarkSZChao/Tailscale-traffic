@@ -136,6 +136,23 @@ class DatabaseTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def test_audit_logs_can_be_limited_per_category(self):
+        for category in ("operation", "system", "auth"):
+            for index in range(3):
+                self.db.audit_log(category, f"action_{index}", f"message {index}")
+
+        logs = self.db.audit_logs(limit=2, per_category=True)
+        category_counts = {
+            category: sum(log["category"] == category for log in logs)
+            for category in ("operation", "system", "auth")
+        }
+
+        self.assertEqual(category_counts, {
+            "operation": 2,
+            "system": 2,
+            "auth": 2,
+        })
+
     def test_legacy_policy_switch_migrates_to_each_rule(self):
         legacy_path = Path(self.temp_dir.name) / "legacy.db"
         with sqlite3.connect(legacy_path) as connection:

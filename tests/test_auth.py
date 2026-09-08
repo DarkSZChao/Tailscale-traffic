@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 import app.main as main
 from app.database import Database
@@ -22,6 +24,65 @@ class AuthenticationTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    @staticmethod
+    def request_from(
+        client_ip: str,
+        headers: dict[str, str] | None = None,
+    ) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/",
+                "raw_path": b"/",
+                "query_string": b"",
+                "headers": [
+                    (key.lower().encode(), value.encode())
+                    for key, value in (headers or {}).items()
+                ],
+                "client": (client_ip, 12345),
+                "server": ("testserver", 80),
+                "scheme": "http",
+            }
+        )
+
+    def test_client_ip_uses_headers_only_from_trusted_proxy(self):
+        proxied = self.request_from(
+            "172.20.0.1",
+            {"X-Forwarded-For": "100.64.0.11, 172.20.0.2"},
+        )
+        self.assertEqual(main.client_ip(proxied), "100.64.0.11")
+
+        spoofed = self.request_from(
+            "192.0.2.10",
+            {"X-Forwarded-For": "100.64.0.12"},
+        )
+        self.assertEqual(main.client_ip(spoofed), "192.0.2.10")
+
+    def test_session_refresh_and_recognized_device_name(self):
+        self.database.record_counters(
+            [Counter("100.64.0.11", 4, "download", 1, 100)]
+        )
+        self.assertTrue(self.database.set_device_alias("100.64.0.11", "工作电脑"))
+        token = self.database.create_auth_session(
+            "浏览器 · 未知设备",
+            "old-agent",
+            "172.20.0.1",
+            False,
+        )
+
+        refreshed = self.database.auth_session(
+            token,
+            device_name="Chrome · Windows",
+            user_agent="new-agent",
+            ip_address="100.64.0.11",
+        )
+        self.assertEqual(refreshed["device_name"], "Chrome · Windows")
+        self.assertEqual(refreshed["ip_address"], "100.64.0.11")
+
+        session = self.database.auth_sessions(token)[0]
+        self.assertEqual(session["recognized_device_name"], "工作电脑")
 
     def test_first_setup_login_settings_password_and_logout(self):
         self.database.record_counters(
@@ -64,12 +125,41 @@ class AuthenticationTests(unittest.TestCase):
             )
             self.assertEqual(logged_in.status_code, 200)
             self.assertIn(SESSION_COOKIE, client.cookies)
+            self.assertNotIn(
+                "max-age",
+                logged_in.headers["set-cookie"].casefold(),
+            )
+
+            sessions = client.get("/api/auth/sessions")
+            self.assertEqual(sessions.status_code, 200)
+            self.assertEqual(len(sessions.json()["sessions"]), 2)
+            self.assertEqual(
+                sum(item["current"] for item in sessions.json()["sessions"]),
+                1,
+            )
+
+            logs = client.get("/api/logs")
+            self.assertEqual(logs.status_code, 200)
+            self.assertTrue(logs.json()["logs"])
+            with sqlite3.connect(self.database.path) as traffic_db:
+                audit_table = traffic_db.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'audit_logs'
+                    """
+                ).fetchone()
+            self.assertIsNone(audit_table)
+            with sqlite3.connect(self.database.log_path) as log_db:
+                log_count = log_db.execute(
+                    "SELECT COUNT(*) FROM audit_logs"
+                ).fetchone()[0]
+            self.assertGreater(log_count, 0)
 
             dashboard = client.get("/api/dashboard")
             self.assertEqual(dashboard.status_code, 200)
             self.assertEqual(
                 dashboard.json()["timezone"],
-                "America/Los_Angeles",
+                "UTC",
             )
 
             device_alias = client.patch(
@@ -85,6 +175,7 @@ class AuthenticationTests(unittest.TestCase):
 
             settings = client.get("/api/settings")
             self.assertEqual(settings.status_code, 200)
+            self.assertIsNotNone(settings.json()["config_modified_at"])
             config = settings.json()["config"]
             config.update(
                 {
@@ -243,6 +334,62 @@ class AuthenticationTests(unittest.TestCase):
             self.assertEqual(logged_out.status_code, 200)
             self.assertNotIn(SESSION_COOKIE, client.cookies)
             self.assertEqual(client.get("/api/dashboard").status_code, 401)
+
+    def test_remembered_session_and_logout_all(self):
+        with TestClient(app) as client:
+            setup = client.post(
+                "/api/setup",
+                json={"password": "测试密码-only", "remember": True},
+            )
+            self.assertEqual(setup.status_code, 200)
+            self.assertIn("max-age=2592000", setup.headers["set-cookie"].casefold())
+
+            sessions = client.get("/api/auth/sessions").json()["sessions"]
+            self.assertEqual(len(sessions), 1)
+            self.assertTrue(sessions[0]["remembered"])
+
+            logout_all = client.post("/api/auth/sessions/logout-all")
+            self.assertEqual(logout_all.status_code, 200)
+            self.assertEqual(logout_all.json()["count"], 1)
+            self.assertEqual(client.get("/api/dashboard").status_code, 401)
+
+    def test_legacy_audit_logs_are_migrated_to_log_database(self):
+        legacy_dir = Path(self.temp_dir.name) / "legacy"
+        legacy_dir.mkdir()
+        traffic_path = legacy_dir / "traffic.db"
+        with sqlite3.connect(traffic_path) as traffic_db:
+            traffic_db.execute(
+                """
+                CREATE TABLE audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    ip_address TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            traffic_db.execute(
+                """
+                INSERT INTO audit_logs
+                    (created_at, category, level, action, message, ip_address)
+                VALUES ('2026-09-06T00:00:00+00:00', 'auth', 'info',
+                        'login', '旧日志', '127.0.0.1')
+                """
+            )
+
+        migrated = Database(str(traffic_path))
+        self.assertEqual(migrated.audit_logs()[0]["message"], "旧日志")
+        with sqlite3.connect(traffic_path) as traffic_db:
+            old_table = traffic_db.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'audit_logs'
+                """
+            ).fetchone()
+        self.assertIsNone(old_table)
 
 
 if __name__ == "__main__":

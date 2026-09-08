@@ -44,6 +44,12 @@ const PAGE_META = {
     description: "调整采集、网站记录、统计口径和面板登录密码。",
     usesMonth: false,
   },
+  logs: {
+    eyebrow: "SYSTEM / AUDIT LOGS",
+    title: "日志",
+    description: "查看登录、配置、规则操作和采集器状态记录。",
+    usesMonth: false,
+  },
 };
 
 const POLICY_RULE_REGISTRY = Object.freeze({
@@ -133,6 +139,9 @@ function showPage(page) {
     loadRules();
   } else if (selectedPage === "settings") {
     loadSettings();
+    loadSessions();
+  } else if (selectedPage === "logs") {
+    loadLogs();
   }
 }
 
@@ -168,6 +177,16 @@ function formatTime(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatDuration(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  const days = Math.floor(value / 86400);
+  const hours = Math.floor((value % 86400) / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  if (days) return `${days}天 ${hours}小时`;
+  if (hours) return `${hours}小时 ${minutes}分钟`;
+  return `${minutes}分钟`;
 }
 
 function currentMonth() {
@@ -326,13 +345,16 @@ function requireLogin(response) {
   return response;
 }
 
-function setCollectorStatus(collector, lastCollect) {
+function setCollectorStatus(collector, lastCollect, dashboardUptime = 0) {
   const status = $("#collectorStatus");
   const healthy = Boolean(collector?.healthy);
   status.classList.toggle("error", !healthy);
   $("#collectorStatusText").textContent = healthy ? "采集正常" : "采集异常";
   status.title = collector?.error || "";
   $("#lastCollect").textContent = `更新于 ${formatTime(lastCollect)}`;
+  $("#systemUptime").textContent = formatDuration(
+    collector?.uptime_seconds ?? dashboardUptime
+  );
 }
 
 function setPanelTimezone(timezone) {
@@ -392,6 +414,12 @@ async function responseError(response, fallback) {
   try {
     const payload = await response.json();
     if (typeof payload.detail === "string") return payload.detail;
+    if (Array.isArray(payload.detail)) {
+      return payload.detail.map((item) => {
+        const field = Array.isArray(item.loc) ? item.loc.at(-1) : "字段";
+        return `${field}: ${item.msg || "值无效"}`;
+      }).join("；");
+    }
   } catch {
     // 使用后备提示。
   }
@@ -411,6 +439,10 @@ async function loadSettings() {
     $("#settingInterval").value = config.collect_interval ?? 10;
     $("#settingRetention").value = config.website_retention_days ?? 180;
     $("#settingTimezone").value = config.timezone || "UTC";
+    $("#configModifiedAt").textContent = formatTime(
+      payload.config_modified_at
+    );
+    $("#projectVersion").textContent = payload.version || "unknown";
     state.settingsLoaded = true;
     message.textContent = payload.website?.error || "";
   } catch (error) {
@@ -444,6 +476,10 @@ async function saveSettings(event) {
     }
     message.classList.add("success");
     message.textContent = "config.yaml 已保存，collector 会在下一轮自动应用。";
+    const payload = await response.json();
+    $("#configModifiedAt").textContent = formatTime(
+      payload.config_modified_at
+    );
     showToast("config.yaml 已更新");
     await loadDashboard();
   } catch (error) {
@@ -487,10 +523,205 @@ async function changePanelPassword(event) {
     message.classList.add("success");
     message.textContent = "密码已更新，其他浏览器中的旧会话已经失效。";
     showToast("面板密码已更新");
+    await loadSessions();
   } catch (error) {
     message.classList.add("error");
     message.textContent = error.message;
     currentPassword.select();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function loadSessions() {
+  const list = $("#sessionList");
+  const message = $("#sessionMessage");
+  message.classList.remove("error");
+  try {
+    const response = requireLogin(await fetch("/api/auth/sessions"));
+    if (!response.ok) {
+      throw new Error(await responseError(response, "读取登录设备失败"));
+    }
+    const payload = await response.json();
+    const sessions = payload.sessions || [];
+    list.innerHTML = sessions.length
+      ? sessions.map((session) => {
+        const recognizedName = session.recognized_device_name || "";
+        const clientDetails = [
+          recognizedName ? session.device_name : "",
+          session.ip_address || "未知地址",
+        ].filter(Boolean).join(" · ");
+        return `
+        <article class="session-row">
+          <div class="session-meta">
+            <strong>${escapeHtml(recognizedName || session.device_name)}</strong>
+            <span>${escapeHtml(clientDetails)}</span>
+          </div>
+          <p>
+            最近活动 ${escapeHtml(formatTime(session.last_seen_at))}<br>
+            <span class="log-level">${session.remembered ? "记住 30 天" : "浏览器会话"}</span>
+            ${session.current ? '<span class="current-session"> · 当前设备</span>' : ""}
+          </p>
+          <button type="button" data-revoke-session="${escapeHtml(session.session_id)}">
+            ${session.current ? "退出当前设备" : "撤销登录"}
+          </button>
+        </article>
+      `;
+      }).join("")
+      : '<div class="loading-row">没有有效的登录设备。</div>';
+    list.querySelectorAll("[data-revoke-session]").forEach((button) => {
+      button.addEventListener("click", () => revokeSession(button));
+    });
+    message.textContent = "";
+  } catch (error) {
+    message.textContent = error.message;
+    message.classList.add("error");
+  }
+}
+
+async function revokeSession(button) {
+  if (!window.confirm("确定退出这个登录设备吗？")) return;
+  button.disabled = true;
+  try {
+    const response = requireLogin(await fetch(
+      `/api/auth/sessions/${encodeURIComponent(button.dataset.revokeSession)}`,
+      { method: "DELETE" }
+    ));
+    if (!response.ok) {
+      throw new Error(await responseError(response, "退出设备失败"));
+    }
+    const payload = await response.json();
+    if (payload.current) {
+      window.location.replace("/login");
+      return;
+    }
+    showToast("登录设备已退出");
+    await loadSessions();
+  } catch (error) {
+    $("#sessionMessage").textContent = error.message;
+    $("#sessionMessage").classList.add("error");
+    button.disabled = false;
+  }
+}
+
+async function logoutAllDevices() {
+  if (!window.confirm("确定退出所有设备吗？当前浏览器也会退出。")) return;
+  const button = $("#logoutAllDevices");
+  button.disabled = true;
+  try {
+    await fetch("/api/auth/sessions/logout-all", { method: "POST" });
+  } finally {
+    window.location.replace("/login");
+  }
+}
+
+const LOG_CATEGORY_GROUPS = [
+  { key: "operation", label: "操作日志" },
+  { key: "system", label: "系统状态日志" },
+  { key: "auth", label: "登录安全日志" },
+];
+
+function logRow(log, includeCategory = true) {
+  const isError = log.level === "error" || log.level === "warning";
+  const action = includeCategory
+    ? `${log.category} · ${log.action}`
+    : log.action;
+  return `
+    <article class="log-row${isError ? " error" : ""}">
+      <div class="log-meta">
+        <strong>${escapeHtml(formatTime(log.created_at))}</strong>
+        <span title="${escapeHtml(action)}">${escapeHtml(action)}</span>
+      </div>
+      <p title="${escapeHtml(log.message)}">${escapeHtml(log.message)}</p>
+      <span class="log-level">${escapeHtml(log.level.toUpperCase())}</span>
+    </article>
+  `;
+}
+
+function renderLogsByCategory(logs) {
+  const list = $("#logsList");
+  if (!logs.length) {
+    list.innerHTML = '<div class="loading-row">没有符合条件的日志。</div>';
+    return;
+  }
+
+  const grouped = new Map();
+  logs.forEach((log) => {
+    if (!grouped.has(log.category)) grouped.set(log.category, []);
+    grouped.get(log.category).push(log);
+  });
+  const knownKeys = new Set(LOG_CATEGORY_GROUPS.map((group) => group.key));
+  const groups = [
+    ...LOG_CATEGORY_GROUPS.filter((group) => grouped.has(group.key)),
+    ...[...grouped.keys()]
+      .filter((category) => !knownKeys.has(category))
+      .sort()
+      .map((category) => ({ key: category, label: `其他日志 · ${category}` })),
+  ];
+
+  list.innerHTML = groups.map((group) => {
+    const entries = grouped.get(group.key) || [];
+    return `
+      <section class="log-category-group">
+        <div class="log-category-heading">
+          <h3>${escapeHtml(group.label)}</h3>
+          <span>${entries.length} 条</span>
+        </div>
+        <div class="log-category-rows">
+          ${entries.map((log) => logRow(log, false)).join("")}
+        </div>
+      </section>
+    `;
+  }).join("");
+}
+
+function renderRecentLogs(logs) {
+  const list = $("#recentLogs");
+  list.innerHTML = logs.length
+    ? logs.map(logRow).join("")
+    : '<div class="loading-row">暂时没有日志。</div>';
+}
+
+async function loadLogs() {
+  const list = $("#logsList");
+  const message = $("#logsMessage");
+  message.classList.remove("error");
+  const params = new URLSearchParams();
+  if ($("#logDate").value) params.set("day", $("#logDate").value);
+  if ($("#logKeyword").value.trim()) {
+    params.set("keyword", $("#logKeyword").value.trim());
+  }
+  try {
+    const query = params.toString();
+    const response = requireLogin(await fetch(
+      `/api/logs${query ? `?${query}` : ""}`
+    ));
+    if (!response.ok) {
+      throw new Error(await responseError(response, "读取日志失败"));
+    }
+    const payload = await response.json();
+    renderLogsByCategory(payload.logs);
+    message.textContent = "";
+  } catch (error) {
+    message.textContent = error.message;
+    message.classList.add("error");
+  }
+}
+
+async function clearLogs() {
+  if (!window.confirm("确定清理全部日志吗？此操作不可撤销。")) return;
+  const button = $("#clearLogs");
+  button.disabled = true;
+  try {
+    const response = requireLogin(await fetch("/api/logs", { method: "DELETE" }));
+    if (!response.ok) {
+      throw new Error(await responseError(response, "清理日志失败"));
+    }
+    showToast("日志已清理");
+    await loadLogs();
+  } catch (error) {
+    $("#logsMessage").textContent = error.message;
+    $("#logsMessage").classList.add("error");
   } finally {
     button.disabled = false;
   }
@@ -1010,7 +1241,7 @@ function drawChart() {
 
   const width = rect.width;
   const height = rect.height;
-  const padding = { top: 8, right: 2, bottom: 30, left: 43 };
+  const padding = { top: 8, right: 2, bottom: 34, left: 72 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   const maxRaw = Math.max(1, ...daily.map((item) => item.upload + item.download));
@@ -1018,7 +1249,7 @@ function drawChart() {
   const unit = chartUnit(max);
 
   ctx.clearRect(0, 0, width, height);
-  ctx.font = '12px Inter, "PingFang SC", sans-serif';
+  ctx.font = '14px Inter, "PingFang SC", sans-serif';
   ctx.textBaseline = "middle";
 
   for (let line = 0; line <= 4; line += 1) {
@@ -1548,7 +1779,13 @@ async function loadDashboard() {
     updateMonthReset();
     renderSummary(payload.summary);
     renderUsers(payload.users, payload.summary.total);
-    setCollectorStatus(payload.collector, payload.last_collect);
+    setCollectorStatus(
+      payload.collector,
+      payload.last_collect,
+      payload.dashboard_uptime_seconds
+    );
+    $("#projectVersion").textContent = payload.version || "unknown";
+    renderRecentLogs(payload.recent_logs || []);
     if (state.currentPage === "overview") drawChart();
   } catch (error) {
     const status = $("#collectorStatus");
@@ -1720,6 +1957,13 @@ $("#removeAccessBlock").addEventListener("click", (event) => {
   removeAccessBlock(event.currentTarget);
 });
 $("#logoutButton").addEventListener("click", logout);
+$("#logoutAllDevices").addEventListener("click", logoutAllDevices);
+$("#refreshLogs").addEventListener("click", loadLogs);
+$("#clearLogs").addEventListener("click", clearLogs);
+$("#logDate").addEventListener("change", loadLogs);
+$("#logKeyword").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") loadLogs();
+});
 $("#configForm").addEventListener("submit", saveSettings);
 $("#passwordForm").addEventListener("submit", changePanelPassword);
 chart.addEventListener("pointermove", handleChartPointer);
@@ -1732,5 +1976,8 @@ window.addEventListener("hashchange", () => {
 setupDialogInteractions();
 showPage(pageFromHash());
 loadDashboard();
-window.setInterval(loadDashboard, 30_000);
+window.setInterval(() => {
+  loadDashboard();
+  if (state.currentPage === "logs") loadLogs();
+}, 30_000);
 window.setInterval(updatePanelTimezoneClock, 1_000);

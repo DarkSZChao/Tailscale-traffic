@@ -3,4 +3,4 @@
 monthly_quota_gb: 3000.0
 collect_interval: 15
 website_retention_days: 180
-timezone: America/Los_Angeles
+timezone: UTC

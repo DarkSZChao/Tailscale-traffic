@@ -9,7 +9,7 @@ import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -32,15 +32,25 @@ WEBSITE_RECENT_BUCKET_COUNT = 24 * 60 * 60 // WEBSITE_RECENT_BUCKET_SECONDS
 WEBSITE_RECENT_RETENTION_BUCKETS = (
     25 * 60 * 60 // WEBSITE_RECENT_BUCKET_SECONDS
 )
+AUTH_SESSION_LIFETIME_DAYS = 30
+AUTH_SESSION_LIMIT = 100
+AUDIT_LOG_LIMIT = 5000
 
 
 class Database:
-    def __init__(self, path: str, config_path: str | None = None):
+    def __init__(
+        self,
+        path: str,
+        config_path: str | None = None,
+        log_path: str | None = None,
+    ):
         self.path = path
         self._timezone_name = DEFAULT_CONFIG.timezone
         parent = os.path.dirname(os.path.abspath(path))
         self.config_path = config_path or os.path.join(parent, "config.yaml")
+        self.log_path = log_path or os.path.join(parent, "log.db")
         os.makedirs(parent, exist_ok=True)
+        self._initialize_log_database()
         self._initialize()
         self.get_app_config()
 
@@ -55,6 +65,36 @@ class Database:
             connection.commit()
         finally:
             connection.close()
+
+    @contextmanager
+    def connect_logs(self):
+        connection = sqlite3.connect(self.log_path, timeout=10)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode = WAL")
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _initialize_log_database(self) -> None:
+        with self.connect_logs() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    ip_address TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_audit_logs_created
+                ON audit_logs(created_at DESC);
+                """
+            )
 
     def _initialize(self) -> None:
         legacy_config: dict[str, str] = {}
@@ -229,6 +269,23 @@ class Database:
                     session_secret TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS auth_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    device_name TEXT NOT NULL,
+                    user_agent TEXT NOT NULL,
+                    ip_address TEXT NOT NULL,
+                    remembered INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    CHECK (remembered IN (0, 1))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires
+                ON auth_sessions(expires_at);
+
                 """
             )
             legacy_table = db.execute(
@@ -334,6 +391,40 @@ class Database:
         if legacy_table:
             with self.connect() as db:
                 db.execute("DROP TABLE IF EXISTS app_config")
+        self._migrate_legacy_audit_logs()
+
+    def _migrate_legacy_audit_logs(self) -> None:
+        with self.connect() as db:
+            exists = db.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'audit_logs'
+                """
+            ).fetchone()
+            if not exists:
+                return
+            rows = db.execute(
+                """
+                SELECT id, created_at, category, level, action, message,
+                       ip_address
+                FROM audit_logs
+                ORDER BY id
+                """
+            ).fetchall()
+
+        with self.connect_logs() as logs:
+            logs.executemany(
+                """
+                INSERT OR IGNORE INTO audit_logs
+                    (id, created_at, category, level, action, message,
+                     ip_address)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [tuple(row) for row in rows],
+            )
+
+        with self.connect() as db:
+            db.execute("DROP TABLE IF EXISTS audit_logs")
 
     def _local_now(self) -> datetime:
         return datetime.now(ZoneInfo(self._timezone_name))
@@ -343,6 +434,14 @@ class Database:
 
     def _now(self) -> str:
         return self._local_now().isoformat(timespec="seconds")
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(UTC)
+
+    @classmethod
+    def _utc_timestamp(cls) -> str:
+        return cls._utc_now().isoformat(timespec="seconds")
 
     def _recent_bucket(self) -> int:
         return int(self._local_now().timestamp()) // RECENT_BUCKET_SECONDS
@@ -401,7 +500,7 @@ class Database:
                     base64.b64encode(salt).decode("ascii"),
                     base64.b64encode(password_hash).decode("ascii"),
                     base64.b64encode(session_secret).decode("ascii"),
-                    self._now(),
+                    self._utc_timestamp(),
                 ),
             )
         return result.rowcount == 1
@@ -442,10 +541,283 @@ class Database:
                     base64.b64encode(salt).decode("ascii"),
                     base64.b64encode(password_hash).decode("ascii"),
                     base64.b64encode(session_secret).decode("ascii"),
-                    self._now(),
+                    self._utc_timestamp(),
                 ),
             )
         return True
+
+    @staticmethod
+    def _session_token_hash(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def create_auth_session(
+        self,
+        device_name: str,
+        user_agent: str,
+        ip_address: str,
+        remembered: bool,
+    ) -> str:
+        token = secrets.token_urlsafe(32)
+        now = self._utc_now()
+        expires_at = now + timedelta(days=AUTH_SESSION_LIFETIME_DAYS)
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM auth_sessions WHERE expires_at <= ?",
+                (now.isoformat(timespec="seconds"),),
+            )
+            db.execute(
+                """
+                INSERT INTO auth_sessions
+                    (session_id, token_hash, device_name, user_agent,
+                     ip_address, remembered, created_at, last_seen_at,
+                     expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    secrets.token_hex(12),
+                    self._session_token_hash(token),
+                    device_name[:120],
+                    user_agent[:500],
+                    ip_address[:80],
+                    int(remembered),
+                    now.isoformat(timespec="seconds"),
+                    now.isoformat(timespec="seconds"),
+                    expires_at.isoformat(timespec="seconds"),
+                ),
+            )
+            db.execute(
+                """
+                DELETE FROM auth_sessions
+                WHERE session_id IN (
+                    SELECT session_id FROM auth_sessions
+                    ORDER BY rowid DESC
+                    LIMIT -1 OFFSET ?
+                )
+                """,
+                (AUTH_SESSION_LIMIT,),
+            )
+        return token
+
+    def auth_session(
+        self,
+        token: str,
+        touch: bool = True,
+        *,
+        device_name: str = "",
+        user_agent: str = "",
+        ip_address: str = "",
+    ) -> dict | None:
+        if not token:
+            return None
+        token_hash = self._session_token_hash(token)
+        now = self._utc_now()
+        with self.connect() as db:
+            row = db.execute(
+                """
+                SELECT session_id, device_name, user_agent, ip_address, remembered,
+                       created_at, last_seen_at, expires_at
+                FROM auth_sessions
+                WHERE token_hash = ? AND expires_at > ?
+                """,
+                (token_hash, now.isoformat(timespec="seconds")),
+            ).fetchone()
+            if not row:
+                return None
+            session = dict(row)
+            last_seen = datetime.fromisoformat(session["last_seen_at"])
+            refreshed_device_name = (device_name or session["device_name"])[:120]
+            refreshed_user_agent = (user_agent or session["user_agent"])[:500]
+            refreshed_ip_address = (ip_address or session["ip_address"])[:80]
+            metadata_changed = (
+                refreshed_device_name != session["device_name"]
+                or refreshed_user_agent != session["user_agent"]
+                or refreshed_ip_address != session["ip_address"]
+            )
+            should_touch = touch and now - last_seen >= timedelta(minutes=5)
+            if metadata_changed or should_touch:
+                session["device_name"] = refreshed_device_name
+                session["user_agent"] = refreshed_user_agent
+                session["ip_address"] = refreshed_ip_address
+            if should_touch:
+                session["last_seen_at"] = now.isoformat(timespec="seconds")
+            if metadata_changed or should_touch:
+                db.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET device_name = ?, user_agent = ?, ip_address = ?,
+                        last_seen_at = ?
+                    WHERE token_hash = ?
+                    """,
+                    (
+                        session["device_name"],
+                        session["user_agent"],
+                        session["ip_address"],
+                        session["last_seen_at"],
+                        token_hash,
+                    ),
+                )
+        session.pop("user_agent", None)
+        session["remembered"] = bool(session["remembered"])
+        return session
+
+    def auth_sessions(self, current_token: str) -> list[dict]:
+        current_hash = self._session_token_hash(current_token)
+        now = self._utc_timestamp()
+        with self.connect() as db:
+            db.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now,))
+            rows = db.execute(
+                """
+                SELECT s.session_id, s.token_hash, s.device_name, s.ip_address,
+                       s.remembered, s.created_at, s.last_seen_at, s.expires_at,
+                       d.device_id AS matched_device_id,
+                       d.device_name AS matched_device_name,
+                       COALESCE(a.alias, '') AS matched_device_alias
+                FROM auth_sessions AS s
+                LEFT JOIN devices AS d ON d.ip = s.ip_address
+                LEFT JOIN device_aliases AS a ON a.device_id = d.device_id
+                ORDER BY last_seen_at DESC
+                """
+            ).fetchall()
+        return [
+            {
+                "session_id": row["session_id"],
+                "device_name": row["device_name"],
+                "recognized_device_name": (
+                    self._device_display_name(
+                        row["matched_device_name"],
+                        row["matched_device_alias"],
+                        row["ip_address"],
+                    )
+                    if row["matched_device_id"]
+                    else ""
+                ),
+                "ip_address": row["ip_address"],
+                "remembered": bool(row["remembered"]),
+                "created_at": row["created_at"],
+                "last_seen_at": row["last_seen_at"],
+                "expires_at": row["expires_at"],
+                "current": hmac.compare_digest(row["token_hash"], current_hash),
+            }
+            for row in rows
+        ]
+
+    def revoke_auth_session(self, session_id: str) -> bool:
+        with self.connect() as db:
+            result = db.execute(
+                "DELETE FROM auth_sessions WHERE session_id = ?",
+                (session_id,),
+            )
+        return result.rowcount == 1
+
+    def revoke_auth_token(self, token: str) -> None:
+        if not token:
+            return
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM auth_sessions WHERE token_hash = ?",
+                (self._session_token_hash(token),),
+            )
+
+    def revoke_all_auth_sessions(self) -> int:
+        with self.connect() as db:
+            result = db.execute("DELETE FROM auth_sessions")
+        return result.rowcount
+
+    def audit_log(
+        self,
+        category: str,
+        action: str,
+        message: str,
+        *,
+        level: str = "info",
+        ip_address: str = "",
+    ) -> None:
+        with self.connect_logs() as db:
+            db.execute(
+                """
+                INSERT INTO audit_logs
+                    (created_at, category, level, action, message, ip_address)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self._utc_timestamp(),
+                    category[:32],
+                    level[:16],
+                    action[:64],
+                    message[:1000],
+                    ip_address[:80],
+                ),
+            )
+            db.execute(
+                """
+                DELETE FROM audit_logs
+                WHERE id <= COALESCE((SELECT MAX(id) FROM audit_logs), 0) - ?
+                """,
+                (AUDIT_LOG_LIMIT,),
+            )
+
+    def audit_logs(
+        self,
+        *,
+        limit: int = 10,
+        day: str | None = None,
+        keyword: str = "",
+        per_category: bool = False,
+    ) -> list[dict]:
+        conditions: list[str] = []
+        values: list[object] = []
+        if day:
+            conditions.append("substr(created_at, 1, 10) = ?")
+            values.append(day)
+        if keyword:
+            conditions.append(
+                "(message LIKE ? ESCAPE '\\' OR action LIKE ? ESCAPE '\\' "
+                "OR category LIKE ? ESCAPE '\\')"
+            )
+            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            values.extend([f"%{escaped}%"] * 3)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        row_limit = max(1, min(100, limit))
+        values.append(row_limit)
+        with self.connect_logs() as db:
+            if per_category:
+                rows = db.execute(
+                    f"""
+                    WITH ranked_logs AS (
+                        SELECT id, created_at, category, level, action,
+                               message, ip_address,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY category ORDER BY id DESC
+                               ) AS category_rank
+                        FROM audit_logs
+                        {where}
+                    )
+                    SELECT id, created_at, category, level, action, message,
+                           ip_address
+                    FROM ranked_logs
+                    WHERE category_rank <= ?
+                    ORDER BY id DESC
+                    """,
+                    values,
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    f"""
+                    SELECT id, created_at, category, level, action, message,
+                           ip_address
+                    FROM audit_logs
+                    {where}
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    values,
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_audit_logs(self) -> int:
+        with self.connect_logs() as db:
+            result = db.execute("DELETE FROM audit_logs")
+        return result.rowcount
 
     def session_secret(self) -> bytes | None:
         with self.connect() as db:
@@ -890,9 +1262,13 @@ class Database:
             "collector_mode": mode,
             "collector_interval": str(interval),
             "collector_error": error[:1000],
-            "collector_heartbeat": self._now(),
+            "collector_heartbeat": self._utc_timestamp(),
         }
         with self.connect() as db:
+            previous = db.execute(
+                "SELECT value FROM meta WHERE key = 'collector_error'"
+            ).fetchone()
+            previous_error = str(previous["value"] if previous else "")
             db.executemany(
                 """
                 INSERT INTO meta(key, value) VALUES (?, ?)
@@ -900,6 +1276,28 @@ class Database:
                 """,
                 values.items(),
             )
+        if error and error != previous_error:
+            self.audit_log(
+                "system", "collector_error", error, level="error"
+            )
+        elif previous_error and not error:
+            self.audit_log(
+                "system",
+                "collector_recovered",
+                "采集器已从异常状态恢复",
+            )
+
+    def mark_collector_started(self) -> None:
+        started_at = self._utc_timestamp()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO meta(key, value) VALUES ('collector_started_at', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (started_at,),
+            )
+        self.audit_log("system", "collector_started", "采集器已启动")
 
     def collector_status(self) -> dict:
         keys = (
@@ -907,6 +1305,7 @@ class Database:
             "collector_interval",
             "collector_error",
             "collector_heartbeat",
+            "collector_started_at",
         )
         placeholders = ",".join("?" for _ in keys)
         with self.connect() as db:
@@ -922,6 +1321,7 @@ class Database:
             interval = 10
         error = values.get("collector_error", "")
         heartbeat = values.get("collector_heartbeat")
+        started_at = values.get("collector_started_at")
 
         stale = True
         if heartbeat:
@@ -946,13 +1346,27 @@ class Database:
             "mode": mode,
             "interval": interval,
             "heartbeat": heartbeat,
+            "started_at": started_at,
+            "uptime_seconds": (
+                max(
+                    0,
+                    int(
+                        (
+                            self._utc_now()
+                            - datetime.fromisoformat(started_at)
+                        ).total_seconds()
+                    ),
+                )
+                if started_at
+                else None
+            ),
         }
 
     def update_website_status(self, enabled: bool, error: str = "") -> None:
         values = {
             "website_enabled": "1" if enabled else "0",
             "website_error": error[:1000],
-            "website_heartbeat": self._now(),
+            "website_heartbeat": self._utc_timestamp(),
         }
         with self.connect() as db:
             db.executemany(

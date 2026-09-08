@@ -4,6 +4,7 @@ const confirmPassword = document.querySelector("#confirmPassword");
 const confirmGroup = document.querySelector("#confirmGroup");
 const button = document.querySelector("#loginButton");
 const errorMessage = document.querySelector("#loginError");
+const rememberDevice = document.querySelector("#rememberDevice");
 let setupMode = false;
 
 async function loadAuthStatus() {
@@ -27,7 +28,7 @@ async function loadAuthStatus() {
     button.textContent = setupMode ? "设置并进入" : "进入";
     document.querySelector("#loginNote").textContent = setupMode
       ? "密码会以安全哈希保存在本机数据库中，不再使用 .env。"
-      : "会话保存在此浏览器中，修改后台密码会自动使旧会话失效。";
+      : "默认关闭浏览器后退出；也可以选择记住此设备 30 天。";
   } catch (error) {
     errorMessage.textContent = error.message;
     button.disabled = true;
@@ -49,7 +50,10 @@ form.addEventListener("submit", async (event) => {
     const response = await fetch(setupMode ? "/api/setup" : "/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: password.value }),
+      body: JSON.stringify({
+        password: password.value,
+        remember: rememberDevice.checked,
+      }),
     });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));

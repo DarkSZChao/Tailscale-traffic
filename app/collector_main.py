@@ -5,7 +5,12 @@ import logging
 import signal
 
 from .collector import Collector
-from .config import CONFIG_PATH, DATABASE_PATH, TAILSCALE_SOCKET
+from .config import (
+    CONFIG_PATH,
+    DATABASE_PATH,
+    LOG_DATABASE_PATH,
+    TAILSCALE_SOCKET,
+)
 from .database import Database
 from .tailscale import TailscaleClient
 
@@ -17,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 
 def create_collector() -> Collector:
-    database = Database(DATABASE_PATH, CONFIG_PATH)
+    database = Database(DATABASE_PATH, CONFIG_PATH, LOG_DATABASE_PATH)
+    database.mark_collector_started()
     return Collector(
         database,
         TailscaleClient(TAILSCALE_SOCKET),
@@ -25,7 +31,9 @@ def create_collector() -> Collector:
 
 
 def healthcheck() -> int:
-    status = Database(DATABASE_PATH, CONFIG_PATH).collector_status()
+    status = Database(
+        DATABASE_PATH, CONFIG_PATH, LOG_DATABASE_PATH
+    ).collector_status()
     if status["healthy"]:
         return 0
     logger.error(status["error"])

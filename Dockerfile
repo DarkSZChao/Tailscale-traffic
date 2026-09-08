@@ -11,7 +11,15 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-compile -r requirements.txt
 
-COPY app ./app
+COPY app/__init__.py \
+     app/config.py \
+     app/database.py \
+     app/firewall.py \
+     app/main.py \
+     app/tailscale.py \
+     ./app/
+COPY app/static ./app/static
+COPY VERSION ./VERSION
 
 EXPOSE 8000
 
