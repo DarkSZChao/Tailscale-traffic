@@ -6,6 +6,7 @@ const state = {
   activeAccessBlockMode: "temporary",
   activeWebsiteTarget: null,
   activeWebsitePeriod: "24h",
+  websiteRequestId: 0,
   panelTimezone: "",
   panelTimezoneFormatter: null,
   settingsLoaded: false,
@@ -1365,15 +1366,6 @@ function openDeviceAliasDialog(device, user) {
   $("#userDialog").showModal();
 }
 
-function localDay() {
-  const now = new Date();
-  return [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, "0"),
-    String(now.getDate()).padStart(2, "0"),
-  ].join("-");
-}
-
 function websiteTime(value, includeDate = false) {
   if (!value) return "—";
   const parsed = new Date(value);
@@ -1390,34 +1382,50 @@ function websiteTime(value, includeDate = false) {
 }
 
 function setWebsitePeriod(period, load = true) {
-  state.activeWebsitePeriod = period === "day" ? "day" : "24h";
+  state.activeWebsitePeriod = ["day", "week"].includes(period) ? period : "24h";
   document.querySelectorAll("[data-website-period]").forEach((button) => {
     const active = button.dataset.websitePeriod === state.activeWebsitePeriod;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
   $("#websiteDayField").hidden = state.activeWebsitePeriod !== "day";
+  $("#websiteEndDayField").hidden = state.activeWebsitePeriod !== "day";
   if (load && state.activeWebsiteTarget) loadWebsiteDetails();
 }
 
 async function loadWebsiteDetails() {
   const target = state.activeWebsiteTarget;
-  const day = $("#websiteDay").value;
+  const startDay = $("#websiteStartDay").value;
+  const endDay = $("#websiteEndDay").value;
+  const requestId = ++state.websiteRequestId;
   const period = state.activeWebsitePeriod;
   const list = $("#websiteList");
-  if (!target || (period === "day" && !day)) return;
-  list.innerHTML = `<div class="website-loading">正在读取${period === "24h" ? "过去1天" : "当天"}网站统计…</div>`;
+  if (!target) return;
+  ["#websiteDestinations", "#websiteVisits", "#websiteTraffic"].forEach((id) => {
+    $(id).textContent = "—";
+  });
+  $("#websiteTrackingNote").textContent = "";
+  if (period === "day" && (!startDay || !endDay || startDay > endDay)) {
+    list.innerHTML = '<div class="website-empty">请选择有效的开始和结束日期，开始日期不能晚于结束日期。</div>';
+    return;
+  }
+  const periodLabel = period === "24h" ? "过去1天" : period === "week" ? "过去一周" : "所选日期范围";
+  list.innerHTML = `<div class="website-loading">正在读取${periodLabel}网站统计…</div>`;
   try {
     const targetPath = target.type === "user"
       ? `/api/users/${encodeURIComponent(target.key)}/websites`
       : `/api/devices/${encodeURIComponent(target.key)}/websites`;
     const params = new URLSearchParams({ period });
-    if (period === "day") params.set("day", day);
+    if (period === "day") {
+      params.set("start_day", startDay);
+      params.set("end_day", endDay);
+    }
     const response = requireLogin(
       await fetch(`${targetPath}?${params}`)
     );
     if (!response.ok) throw new Error("读取网站统计失败");
     const payload = await response.json();
+    if (requestId !== state.websiteRequestId) return;
     const summary = payload.summary || {};
     $("#websiteDestinations").textContent = `${summary.destinations || 0}`;
     $("#websiteVisits").textContent = `${summary.visits || 0}`;
@@ -1428,13 +1436,11 @@ async function loadWebsiteDetails() {
       : "";
     const periodNote = payload.period === "24h"
       ? "当前为滚动过去1天，不受面板统计时区影响；访问时间按当前浏览器时区显示。"
-      : `当前按 ${payload.timezone || "面板设置"} 的自然日统计；访问时间按当前浏览器时区显示。`;
-    $("#websiteTrackingNote").textContent = tracking.error
-      ? tracking.error
-      : `${aggregationNote}${periodNote}`;
+      : `统计范围：${payload.start_day} 至 ${payload.end_day}（含首尾日期${payload.period === "week" ? "，今天及前六天" : ""}），按 ${payload.timezone || "面板设置"} 的自然日统计；仅统计已保留的记录，访问时间按当前浏览器时区显示。`;
+    $("#websiteTrackingNote").textContent = `${aggregationNote}${periodNote}${tracking.error ? ` ${tracking.error}` : ""}`;
 
     const websites = payload.websites || [];
-    const includeDate = payload.period === "24h";
+    const includeDate = payload.period !== "day" || payload.start_day !== payload.end_day;
     list.innerHTML = websites.length
       ? websites.map((item) => `
         <article class="website-row">
@@ -1448,8 +1454,9 @@ async function loadWebsiteDetails() {
           <span><small>总计</small><b>${formatBytes(item.total, true)}</b></span>
         </article>
       `).join("")
-      : `<div class="website-empty">${period === "24h" ? "过去1天" : "这一天"}还没有识别到网站访问记录。</div>`;
+      : `<div class="website-empty">${periodLabel}还没有识别到网站访问记录。</div>`;
   } catch (error) {
+    if (requestId !== state.websiteRequestId) return;
     list.innerHTML = `<div class="website-empty">${escapeHtml(error.message)}</div>`;
   }
 }
@@ -1459,9 +1466,16 @@ function openWebsiteDetails(type, key, name) {
   $("#websiteTitle").textContent = type === "user"
     ? `${name} · 用户访问记录`
     : `${name} · 设备访问记录`;
-  const dayInput = $("#websiteDay");
-  dayInput.max = localDay();
-  dayInput.value = localDay();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: state.panelTimezone || "UTC",
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(new Date());
+  const datePart = (type) => parts.find((part) => part.type === type).value;
+  const today = `${datePart("year")}-${datePart("month")}-${datePart("day")}`;
+  ["#websiteStartDay", "#websiteEndDay"].forEach((id) => {
+    $(id).max = today;
+    $(id).value = today;
+  });
   setWebsitePeriod("24h", false);
   $("#websiteDialog").showModal();
   loadWebsiteDetails();
@@ -1886,8 +1900,10 @@ $("#aliasInput").addEventListener("keydown", (event) => {
 $("#userDialog .close-button").addEventListener("click", () => {
   $("#userDialog").close("cancel");
 });
-$("#websiteDay").addEventListener("change", () => {
-  if (state.activeWebsitePeriod === "day") loadWebsiteDetails();
+["#websiteStartDay", "#websiteEndDay"].forEach((id) => {
+  $(id).addEventListener("change", () => {
+    if (state.activeWebsitePeriod === "day") loadWebsiteDetails();
+  });
 });
 document.querySelectorAll("[data-website-period]").forEach((button) => {
   button.addEventListener("click", () => {

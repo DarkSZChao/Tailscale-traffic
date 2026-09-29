@@ -863,6 +863,53 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(recent_user_payload["summary"]["upload"], 220)
         self.assertEqual(recent_user_payload["summary"]["download"], 500)
 
+    def test_website_date_ranges_and_week_aggregate_daily_rows(self):
+        self.db.sync_peers([
+            Peer(
+                ip=f"100.64.4.{index}", family=4,
+                identity_key="user:range", login_name="range@example.com",
+                display_name="Range", device_id=f"range-{index}",
+                device_name="phone", dns_name="", os_name="ios",
+                online=True, network_scope="external",
+            )
+            for index in (2, 3)
+        ])
+        with self.db.connect() as db:
+            db.execute("INSERT INTO domains(domain) VALUES ('example.com')")
+            domain_id = db.execute(
+                "SELECT domain_id FROM domains WHERE domain = 'example.com'"
+            ).fetchone()[0]
+            for day in ("2026-08-23", "2026-08-24", "2026-08-30", "2026-08-31"):
+                for index in (2, 3):
+                    db.execute(
+                        "INSERT INTO device_domain_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (day, f"range-{index}", domain_id, 1, 10, 20,
+                         f"{day}T10:00:00+00:00", f"{day}T11:00:00+00:00"),
+                    )
+        for method, key, multiplier in (
+            (self.db.websites_for_device, "range-2", 1),
+            (self.db.websites_for_user, "user:range", 2),
+        ):
+            payload = method(key, None, start_day="2026-08-24", end_day="2026-08-30")
+            self.assertEqual(payload["summary"]["destinations"], 1)
+            self.assertEqual(payload["summary"]["visits"], 2 * multiplier)
+            self.assertEqual(payload["summary"]["total"], 60 * multiplier)
+            self.assertEqual(payload["websites"][0]["first_seen"], "2026-08-24T10:00:00+00:00")
+            self.assertEqual(payload["websites"][0]["last_seen"], "2026-08-30T11:00:00+00:00")
+            with patch.object(self.db, "_today", return_value=date(2026, 8, 30)):
+                week = method(key, None, recent_week=True)
+            self.assertEqual(week["period"], "week")
+            self.assertEqual(week["start_day"], "2026-08-24")
+            self.assertEqual(week["end_day"], "2026-08-30")
+            self.assertEqual(week["summary"], payload["summary"])
+            single = method(key, None, start_day="2026-08-24", end_day="2026-08-24")
+            self.assertEqual(single["summary"]["total"], 30 * multiplier)
+            empty = method(key, None, start_day="2026-08-25", end_day="2026-08-29")
+            self.assertEqual(empty["summary"]["total"], 0)
+            for start, end in (("2026-08-30", "2026-08-24"), ("2026-02-30", "2026-08-30"), ("2026-08-24", None)):
+                with self.assertRaises(ValueError):
+                    method(key, None, start_day=start, end_day=end)
+
     def test_recent_website_usage_uses_a_rolling_timezone_free_window(self):
         now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
         address = "100.64.4.7"

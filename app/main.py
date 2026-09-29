@@ -471,13 +471,21 @@ async def user_devices(
 async def user_websites(
     identity_key: str,
     day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    period: str = Query(default="day", pattern=r"^(day|24h)$"),
+    start_day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    period: str = Query(default="day", pattern=r"^(day|24h|week)$"),
 ):
-    payload = database.websites_for_user(
-        identity_key,
-        day,
-        recent_24h=period == "24h",
-    )
+    try:
+        payload = database.websites_for_user(
+            identity_key,
+            day,
+            recent_24h=period == "24h",
+            recent_week=period == "week",
+            start_day=start_day,
+            end_day=end_day,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if payload is None:
         raise HTTPException(status_code=404, detail="用户不存在")
     return payload
@@ -487,13 +495,21 @@ async def user_websites(
 async def device_websites(
     device_id: str,
     day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    period: str = Query(default="day", pattern=r"^(day|24h)$"),
+    start_day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    end_day: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    period: str = Query(default="day", pattern=r"^(day|24h|week)$"),
 ):
-    payload = database.websites_for_device(
-        device_id,
-        day,
-        recent_24h=period == "24h",
-    )
+    try:
+        payload = database.websites_for_device(
+            device_id,
+            day,
+            recent_24h=period == "24h",
+            recent_week=period == "week",
+            start_day=start_day,
+            end_day=end_day,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if payload is None:
         raise HTTPException(status_code=404, detail="设备不存在")
     return payload

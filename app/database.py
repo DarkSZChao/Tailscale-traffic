@@ -1649,6 +1649,30 @@ class Database:
         except ValueError:
             return self._today().isoformat()
 
+    def _website_range(
+        self,
+        day: str | None,
+        start_day: str | None,
+        end_day: str | None,
+        recent_week: bool,
+    ) -> tuple[str, str]:
+        if recent_week:
+            end = self._today()
+            return (end - timedelta(days=6)).isoformat(), end.isoformat()
+        if start_day is None and end_day is None:
+            selected = self._website_day(day)
+            return selected, selected
+        if not start_day or not end_day:
+            raise ValueError("请选择开始和结束日期")
+        try:
+            start = date.fromisoformat(start_day)
+            end = date.fromisoformat(end_day)
+        except ValueError:
+            raise ValueError("日期无效") from None
+        if start > end:
+            raise ValueError("开始日期不能晚于结束日期")
+        return start.isoformat(), end.isoformat()
+
     @staticmethod
     def _website_payload(rows: Iterable[sqlite3.Row]) -> dict:
         websites = [
@@ -1680,8 +1704,14 @@ class Database:
         day: str | None,
         *,
         recent_24h: bool = False,
+        start_day: str | None = None,
+        end_day: str | None = None,
+        recent_week: bool = False,
     ) -> dict | None:
-        normalized_day = None if recent_24h else self._website_day(day)
+        start, end = (None, None) if recent_24h else self._website_range(
+            day, start_day, end_day, recent_week
+        )
+        normalized_day = start if start == end else None
         with self.connect() as db:
             device = db.execute(
                 """
@@ -1720,15 +1750,19 @@ class Database:
             else:
                 rows = db.execute(
                     """
-                    SELECT d.domain, u.visit_count, u.upload_bytes,
-                           u.download_bytes, u.first_seen, u.last_seen
+                    SELECT d.domain, SUM(u.visit_count) AS visit_count,
+                           SUM(u.upload_bytes) AS upload_bytes,
+                           SUM(u.download_bytes) AS download_bytes,
+                           MIN(u.first_seen) AS first_seen,
+                           MAX(u.last_seen) AS last_seen
                     FROM device_domain_daily AS u
                     JOIN domains AS d ON d.domain_id = u.domain_id
-                    WHERE u.device_id = ? AND u.day = ?
-                    ORDER BY (u.upload_bytes + u.download_bytes) DESC,
-                             u.visit_count DESC, d.domain
+                    WHERE u.device_id = ? AND u.day BETWEEN ? AND ?
+                    GROUP BY u.domain_id, d.domain
+                    ORDER BY (SUM(u.upload_bytes) + SUM(u.download_bytes)) DESC,
+                             SUM(u.visit_count) DESC, d.domain
                     """,
-                    (device_id, normalized_day),
+                    (device_id, start, end),
                 ).fetchall()
 
         return {
@@ -1739,7 +1773,9 @@ class Database:
                 device["ipv4"],
             ),
             "day": normalized_day,
-            "period": "24h" if recent_24h else "day",
+            "period": "24h" if recent_24h else "week" if recent_week else "day",
+            "start_day": start,
+            "end_day": end,
             "timezone": self._timezone_name,
             **self._website_payload(rows),
             "tracking": self.website_status(),
@@ -1751,8 +1787,14 @@ class Database:
         day: str | None,
         *,
         recent_24h: bool = False,
+        start_day: str | None = None,
+        end_day: str | None = None,
+        recent_week: bool = False,
     ) -> dict | None:
-        normalized_day = None if recent_24h else self._website_day(day)
+        start, end = (None, None) if recent_24h else self._website_range(
+            day, start_day, end_day, recent_week
+        )
+        normalized_day = start if start == end else None
         with self.connect() as db:
             user = db.execute(
                 """
@@ -1818,13 +1860,13 @@ class Database:
                         FROM devices
                         WHERE identity_key = ?
                     ) AS user_devices ON user_devices.device_id = u.device_id
-                    WHERE u.day = ?
+                    WHERE u.day BETWEEN ? AND ?
                     GROUP BY u.domain_id, d.domain
                     ORDER BY
                         (SUM(u.upload_bytes) + SUM(u.download_bytes)) DESC,
                         SUM(u.visit_count) DESC, d.domain
                     """,
-                    (identity_key, normalized_day),
+                    (identity_key, start, end),
                 ).fetchall()
 
         return {
@@ -1832,7 +1874,9 @@ class Database:
             "user_name": str(user["name"]),
             "device_count": device_count,
             "day": normalized_day,
-            "period": "24h" if recent_24h else "day",
+            "period": "24h" if recent_24h else "week" if recent_week else "day",
+            "start_day": start,
+            "end_day": end,
             "timezone": self._timezone_name,
             **self._website_payload(rows),
             "tracking": self.website_status(),

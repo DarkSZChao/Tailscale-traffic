@@ -211,8 +211,26 @@ class AuthenticationTests(unittest.TestCase):
             self.assertEqual(user_websites.json()["device_count"], 1)
             self.assertEqual(user_websites.json()["websites"], [])
 
+            for target in ("devices/100.64.0.11", "users/unknown:100.64.0.11"):
+                path = f"/api/{target}/websites"
+                week = client.get(path, params={"period": "week"})
+                self.assertEqual(week.status_code, 200)
+                self.assertEqual(week.json()["period"], "week")
+                selected = client.get(path, params={
+                    "period": "day", "start_day": "2026-07-22", "end_day": "2026-07-28",
+                })
+                self.assertEqual(selected.status_code, 200)
+                self.assertEqual(selected.json()["start_day"], "2026-07-22")
+                self.assertEqual(selected.json()["end_day"], "2026-07-28")
+                for params in (
+                    {"start_day": "2026-07-28", "end_day": "2026-07-22"},
+                    {"start_day": "2026-02-30", "end_day": "2026-07-28"},
+                    {"start_day": "2026-07-22"},
+                ):
+                    self.assertEqual(client.get(path, params=params).status_code, 422)
+
             invalid_period = client.get(
-                "/api/devices/100.64.0.11/websites?period=week"
+                "/api/devices/100.64.0.11/websites?period=invalid"
             )
             self.assertEqual(invalid_period.status_code, 422)
 

@@ -393,11 +393,16 @@
           <span class="website-period-label">统计范围</span>
           <div class="website-period-toggle" role="group" aria-label="网站访问统计范围">
             <button type="button" data-website-period="24h" aria-pressed="true">过去1天</button>
+            <button type="button" data-website-period="week" aria-pressed="false">过去一周</button>
             <button type="button" data-website-period="day" aria-pressed="false">按日期</button>
           </div>
           <label id="websiteDayField" hidden>
-            <span>统计日期 · 按面板时区</span>
-            <input id="websiteDay" type="date">
+            <span>开始日期 · 按面板时区</span>
+            <input id="websiteStartDay" type="date">
+          </label>
+          <label id="websiteEndDayField" hidden>
+            <span>结束日期 · 含当天</span>
+            <input id="websiteEndDay" type="date">
           </label>
         </div>
         <div class="website-summary">
