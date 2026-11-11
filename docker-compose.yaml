@@ -24,7 +24,8 @@ services:
     container_name: tailscale-traffic-dashboard
     restart: unless-stopped
     ports:
-      - "4656:8000"
+      - "127.0.0.1:4656:8000"
+      - "100.81.5.63:4656:8000"
     volumes:
       - ./data:/data
       - ./config.yaml:/config.yaml
