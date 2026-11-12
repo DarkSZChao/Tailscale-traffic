@@ -10,6 +10,7 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -43,24 +44,32 @@ class Database:
         path: str,
         config_path: str | None = None,
         log_path: str | None = None,
+        *,
+        read_only: bool = False,
     ):
         self.path = path
+        self.read_only = read_only
         self._timezone_name = DEFAULT_CONFIG.timezone
         parent = os.path.dirname(os.path.abspath(path))
         self.config_path = config_path or os.path.join(parent, "config.yaml")
         self.log_path = log_path or os.path.join(parent, "log.db")
-        os.makedirs(parent, exist_ok=True)
-        self._initialize_log_database()
-        self._initialize()
+        if not read_only:
+            os.makedirs(parent, exist_ok=True)
+            self._initialize_log_database()
+            self._initialize()
         self.get_app_config()
 
     @contextmanager
     def connect(self):
-        connection = sqlite3.connect(self.path, timeout=10)
+        path = Path(self.path).resolve().as_uri() + "?mode=ro" if self.read_only else self.path
+        connection = sqlite3.connect(path, uri=self.read_only, timeout=10)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
         try:
+            if self.read_only:
+                connection.execute("BEGIN")
+            else:
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("PRAGMA journal_mode = WAL")
             yield connection
             connection.commit()
         finally:
@@ -122,6 +131,7 @@ class Database:
                     os_name TEXT NOT NULL DEFAULT '',
                     online INTEGER NOT NULL DEFAULT 0,
                     expired INTEGER NOT NULL DEFAULT 0,
+                    sharee_node INTEGER NOT NULL DEFAULT 0,
                     last_seen TEXT NOT NULL
                 );
 
@@ -337,6 +347,8 @@ class Database:
                     ADD COLUMN expired INTEGER NOT NULL DEFAULT 0
                     """
                 )
+            if "sharee_node" not in device_columns:
+                db.execute("ALTER TABLE devices ADD COLUMN sharee_node INTEGER NOT NULL DEFAULT 0")
             quota_columns = {
                 row["name"]
                 for row in db.execute("PRAGMA table_info(quota_rules)").fetchall()
@@ -842,7 +854,7 @@ class Database:
         )
         now = self._now()
         with self.connect() as db:
-            db.execute("UPDATE devices SET online = 0")
+            db.execute("UPDATE devices SET online = 0, sharee_node = 0 WHERE online = 1 OR sharee_node = 1")
             if present_user_keys:
                 placeholders = ",".join("?" for _ in present_user_keys)
                 db.execute(
@@ -1034,8 +1046,8 @@ class Database:
                     """
                     INSERT INTO devices
                         (ip, family, identity_key, device_id, device_name,
-                         dns_name, os_name, online, expired, last_seen)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         dns_name, os_name, online, expired, sharee_node, last_seen)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(ip) DO UPDATE SET
                         family = excluded.family,
                         identity_key = excluded.identity_key,
@@ -1045,6 +1057,7 @@ class Database:
                         os_name = excluded.os_name,
                         online = excluded.online,
                         expired = excluded.expired,
+                        sharee_node = excluded.sharee_node,
                         last_seen = excluded.last_seen
                     """,
                     (
@@ -1057,6 +1070,7 @@ class Database:
                         peer.os_name,
                         int(peer.online),
                         int(peer.expired),
+                        int(peer.sharee_node),
                         now,
                     ),
                 )
@@ -1068,19 +1082,25 @@ class Database:
                 for row in db.execute("SELECT ip, family FROM devices").fetchall()
             ]
 
-    def unresolved_addresses(self, addresses: Iterable[str]) -> list[str]:
-        unique = sorted(set(addresses))
-        if not unique:
-            return []
+    def whois_candidates(self, addresses: Iterable[str], known: set[str]) -> list[str]:
+        """Refresh hidden sharees, even while their traffic is blocked."""
         with self.connect() as db:
-            unresolved = []
-            for address in unique:
-                row = db.execute(
-                    "SELECT identity_key FROM devices WHERE ip = ?", (address,)
-                ).fetchone()
-                if not row or row["identity_key"].startswith("unknown:"):
-                    unresolved.append(address)
-            return unresolved
+            rows = db.execute(
+                """
+                SELECT d.ip, d.identity_key, i.network_scope, i.is_present
+                FROM devices AS d JOIN identities AS i USING (identity_key)
+                """
+            )
+            devices = {row["ip"]: row for row in rows}
+        candidates = {
+            ip for ip in addresses
+            if ip not in devices or devices[ip]["identity_key"].startswith("unknown:")
+        }
+        candidates.update(
+            ip for ip, row in devices.items()
+            if row["network_scope"] == "external" and row["is_present"]
+        )
+        return sorted(candidates - known)
 
     def _ensure_unknown(
         self, db: sqlite3.Connection, counter: Counter
@@ -2032,6 +2052,8 @@ class Database:
                 db, target_type, target_key
             )
 
+            sharee_eligible = bool(self._shared_device_addresses(db, target_type, target_key))
+
         limit = int(rule["monthly_limit_bytes"]) if rule else None
         quota_enabled = bool(rule and rule["enabled"])
         access_enabled = bool(access_block and access_block["enabled"])
@@ -2045,10 +2067,10 @@ class Database:
             self._local_now(),
         )
         quota_blocked = bool(
-            quota_enabled and target_present and quota_triggered
+            quota_enabled and sharee_eligible and quota_triggered
         )
         manual_blocked = bool(
-            access_enabled and target_present and access_active
+            access_enabled and sharee_eligible and access_active
         )
         enabled_values = [
             enabled
@@ -2300,6 +2322,20 @@ class Database:
                 return None
         return self.quota_state(target_type, target_key)
 
+    @staticmethod
+    def _shared_device_addresses(db: sqlite3.Connection, target_type: str, target_key: str) -> set[str]:
+        column = {"user": "identity_key", "device": "device_id"}.get(target_type)
+        if column is None:
+            return set()
+        rows = db.execute(
+            f"""
+            SELECT d.ip FROM devices AS d JOIN identities AS i USING (identity_key)
+            WHERE d.{column} = ? AND d.sharee_node = 1 AND d.expired = 0 AND i.is_present = 1
+            """,
+            (target_key,),
+        )
+        return {row["ip"] for row in rows}
+
     def blocked_addresses(self) -> set[str]:
         start, end, current_month = self.month_bounds(None)
         now = self._local_now()
@@ -2331,17 +2367,7 @@ class Database:
                     or rule["bypass_month"] == current_month
                 ):
                     continue
-                if rule["target_type"] == "user":
-                    rows = db.execute(
-                        "SELECT ip FROM devices WHERE identity_key = ?",
-                        (rule["target_key"],),
-                    ).fetchall()
-                else:
-                    rows = db.execute(
-                        "SELECT ip FROM devices WHERE device_id = ?",
-                        (rule["target_key"],),
-                    ).fetchall()
-                blocked.update(row["ip"] for row in rows)
+                blocked.update(self._shared_device_addresses(db, rule["target_type"], rule["target_key"]))
             access_blocks = db.execute(
                 """
                 SELECT target_type, target_key, block_mode,
@@ -2360,17 +2386,7 @@ class Database:
                     continue
                 if not self._access_block_active(access_block, now):
                     continue
-                if access_block["target_type"] == "user":
-                    rows = db.execute(
-                        "SELECT ip FROM devices WHERE identity_key = ?",
-                        (access_block["target_key"],),
-                    ).fetchall()
-                else:
-                    rows = db.execute(
-                        "SELECT ip FROM devices WHERE device_id = ?",
-                        (access_block["target_key"],),
-                    ).fetchall()
-                blocked.update(row["ip"] for row in rows)
+                blocked.update(self._shared_device_addresses(db, access_block["target_type"], access_block["target_key"]))
         return blocked
 
     def quota_rules_overview(self) -> list[dict]:

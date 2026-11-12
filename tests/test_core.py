@@ -71,6 +71,7 @@ class TailscaleTests(unittest.TestCase):
         self.assertEqual(peers[0].login_name, "friend@example.com")
         self.assertEqual({peer.family for peer in peers}, {4, 6})
         self.assertEqual({peer.network_scope for peer in peers}, {"external"})
+        self.assertTrue(all(peer.sharee_node for peer in peers))
         self.assertEqual({peer.expired for peer in peers}, {True})
 
     def test_whois_maps_external_shared_user(self):
@@ -99,6 +100,12 @@ class TailscaleTests(unittest.TestCase):
         self.assertEqual(peer.identity_key, "user:42")
         self.assertEqual(peer.device_id, "n-shared")
         self.assertEqual(peer.network_scope, "external")
+        self.assertFalse(peer.sharee_node)
+        confirmed = TailscaleClient._peer_from_whois(
+            ipaddress.ip_address("100.64.1.2"),
+            {"Node": {"Hostinfo": {"ShareeNode": True}}},
+        )
+        self.assertTrue(confirmed.sharee_node)
         self.assertIn(
             "%5Bfd7a%3A115c%3Aa1e0%3A%3A42%5D%3A1",
             client.requested_path,
@@ -476,6 +483,7 @@ class DatabaseTests(unittest.TestCase):
                     os_name="",
                     online=True,
                     network_scope="external",
+                    sharee_node=True,
                 )
                 for ip, family in [
                     ("100.94.69.21", 4),
@@ -635,6 +643,7 @@ class DatabaseTests(unittest.TestCase):
                 os_name="ios",
                 online=True,
                 network_scope="external",
+                sharee_node=True,
             ),
             Peer(
                 ip="100.64.1.7",
@@ -648,6 +657,7 @@ class DatabaseTests(unittest.TestCase):
                 os_name="ios",
                 online=True,
                 network_scope="external",
+                sharee_node=True,
             ),
             Peer(
                 ip="100.64.1.8",
@@ -661,6 +671,7 @@ class DatabaseTests(unittest.TestCase):
                 os_name="ios",
                 online=False,
                 network_scope="external",
+                sharee_node=True,
             ),
         ]
         self.db.sync_peers(peers)
@@ -707,6 +718,7 @@ class DatabaseTests(unittest.TestCase):
             os_name="ios",
             online=False,
             network_scope="external",
+            sharee_node=True,
         )
         self.db.sync_peers([peer])
         self.assertEqual(len(self.db.dashboard(None, 10_000)["users"]), 1)
@@ -728,6 +740,7 @@ class DatabaseTests(unittest.TestCase):
             os_name="ios",
             online=True,
             network_scope="external",
+            sharee_node=True,
         )
         self.db.sync_peers([peer])
         self.db.record_counters(
@@ -778,6 +791,7 @@ class DatabaseTests(unittest.TestCase):
                     os_name="ios",
                     online=True,
                     network_scope="external",
+                    sharee_node=True,
                 )
             ]
         )
@@ -834,6 +848,7 @@ class DatabaseTests(unittest.TestCase):
                     os_name="android",
                     online=True,
                     network_scope="external",
+                    sharee_node=True,
                 )
             ]
         )
@@ -870,7 +885,7 @@ class DatabaseTests(unittest.TestCase):
                 identity_key="user:range", login_name="range@example.com",
                 display_name="Range", device_id=f"range-{index}",
                 device_name="phone", dns_name="", os_name="ios",
-                online=True, network_scope="external",
+                online=True, network_scope="external", sharee_node=True,
             )
             for index in (2, 3)
         ])
@@ -927,6 +942,7 @@ class DatabaseTests(unittest.TestCase):
                     os_name="ios",
                     online=True,
                     network_scope="external",
+                    sharee_node=True,
                 )
             ]
         )
@@ -1052,6 +1068,7 @@ class DatabaseTests(unittest.TestCase):
                     os_name="ios",
                     online=True,
                     network_scope="external",
+                    sharee_node=True,
                 )
             ]
         )
@@ -1111,6 +1128,7 @@ class DatabaseTests(unittest.TestCase):
                 os_name="ios",
                 online=True,
                 network_scope="external",
+                sharee_node=True,
             )
             for ip, family in [
                 ("100.64.1.7", 4),
@@ -1144,28 +1162,27 @@ class DatabaseTests(unittest.TestCase):
         )
 
     def test_user_quota_blocks_every_device_for_that_user(self):
-        for index in (1, 2):
-            address = f"100.64.2.{index}"
-            self.db.sync_peers(
-                [
-                    Peer(
-                        ip=address,
-                        family=4,
-                        identity_key="user:42",
-                        login_name="friend@example.com",
-                        display_name="Friend",
-                        device_id=f"node-{index}",
-                        device_name=f"phone-{index}",
-                        dns_name="",
-                        os_name="ios",
-                        online=True,
-                        network_scope="external",
-                    )
-                ]
+        peers = [
+            Peer(
+                ip=f"100.64.2.{index}",
+                family=4,
+                identity_key="user:42",
+                login_name="friend@example.com",
+                display_name="Friend",
+                device_id=f"node-{index}",
+                device_name=f"phone-{index}",
+                dns_name="",
+                os_name="ios",
+                online=True,
+                network_scope="external",
+                sharee_node=True,
             )
-            self.db.record_counters(
-                [Counter(address, 4, "upload", 1, 400 * index)]
-            )
+            for index in (1, 2)
+        ]
+        self.db.sync_peers(peers)
+        self.db.record_counters(
+            [Counter(peer.ip, 4, "upload", 1, 400 * index) for index, peer in enumerate(peers, 1)]
+        )
         state = self.db.set_quota_rule("user", "user:42", 1_000)
         self.assertTrue(state["blocked"])
         self.assertEqual(
@@ -1186,6 +1203,7 @@ class DatabaseTests(unittest.TestCase):
             os_name="ios",
             online=True,
             network_scope="external",
+            sharee_node=True,
         )
         self.db.sync_peers([peer])
         self.db.record_counters(
@@ -1217,6 +1235,7 @@ class DatabaseTests(unittest.TestCase):
             os_name="ios",
             online=True,
             network_scope="external",
+            sharee_node=True,
         )
         self.db.sync_peers([peer])
         self.db.record_counters(
@@ -1289,6 +1308,7 @@ class DatabaseTests(unittest.TestCase):
                 os_name="ios",
                 online=True,
                 network_scope="external",
+                sharee_node=True,
             )
             for ip, family in [
                 ("100.64.3.7", 4),
@@ -1378,20 +1398,15 @@ class CollectorTests(unittest.TestCase):
                     os_name="ios",
                     online=True,
                     network_scope="external",
+                    sharee_node=True,
                 )
 
         class FakeFirewall:
-            def __init__(self):
-                self.blocked = None
-
             def ensure(self):
                 pass
 
             def counters(self):
                 return [Counter("100.64.2.3", 4, "download", 5, 2048)]
-
-            def set_blocked(self, addresses):
-                self.blocked = addresses
 
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(str(Path(temp_dir) / "traffic.db"))
@@ -1404,7 +1419,6 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(
                 dashboard["users"][0]["network_scope"], "external"
             )
-            self.assertEqual(firewall.blocked, set())
 
 
 class FirewallParserTests(unittest.TestCase):
@@ -1417,29 +1431,6 @@ class FirewallParserTests(unittest.TestCase):
         self.assertIsNotNone(match6)
         self.assertEqual(match4.group("bytes"), "3456")
         self.assertEqual(match6.group("ip"), "fd7a:115c:a1e0::1")
-
-    def test_block_set_update_uses_atomic_swap_and_ignores_public_ips(self):
-        class FakeFirewall(Firewall):
-            def __init__(self):
-                super().__init__("tailscale0")
-                self.ipset_calls = []
-
-            def _run_ipset(self, args):
-                self.ipset_calls.append(args)
-                return type("Result", (), {"returncode": 0})()
-
-        firewall = FakeFirewall()
-        firewall.set_blocked(
-            {"100.64.1.8", "fd7a:115c:a1e0::48", "8.8.8.8"}
-        )
-        add_calls = [
-            call for call in firewall.ipset_calls if call[0] == "add"
-        ]
-        self.assertEqual(len(add_calls), 2)
-        self.assertTrue(
-            any(call[:3] == ["swap", "tsm_block4_next", "tsm_block4"]
-                for call in firewall.ipset_calls)
-        )
 
     def test_forward_jumps_are_moved_ahead_of_tailscale_accept(self):
         class FakeFirewall(Firewall):

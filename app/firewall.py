@@ -28,8 +28,6 @@ class Firewall:
         (6, "upload"): "tsm_upload6",
         (6, "download"): "tsm_download6",
     }
-    BLOCK_SETS = {4: "tsm_block4", 6: "tsm_block6"}
-    BLOCK_STAGING_SETS = {4: "tsm_block4_next", 6: "tsm_block6_next"}
     TAILSCALE_RANGES = {4: "100.64.0.0/10", 6: "fd7a:115c:a1e0::/48"}
     IPSET_LINE = re.compile(
         r"^add\s+(?P<set>\S+)\s+(?P<ip>\S+).*?"
@@ -84,21 +82,6 @@ class Firewall:
     def ensure(self) -> None:
         for family in (4, 6):
             set_family = "inet6" if family == 6 else "inet"
-            for set_name in (
-                self.BLOCK_SETS[family],
-                self.BLOCK_STAGING_SETS[family],
-            ):
-                self._run_ipset(
-                    [
-                        "create",
-                        set_name,
-                        "hash:ip",
-                        "family",
-                        set_family,
-                        "-exist",
-                    ]
-                )
-
             for direction, chain in self.CHAINS.items():
                 set_name = self.SETS[(family, direction)]
                 self._run_ipset(
@@ -121,38 +104,6 @@ class Firewall:
                         raise FirewallError(f"无法创建防火墙计数链 {chain}")
 
                 set_direction = "src" if direction == "upload" else "dst"
-                block_rule = [
-                    "-t",
-                    "filter",
-                    "-C",
-                    chain,
-                    "-m",
-                    "set",
-                    "--match-set",
-                    self.BLOCK_SETS[family],
-                    set_direction,
-                    "-j",
-                    "DROP",
-                ]
-                if self._run(family, block_rule, check=False).returncode:
-                    self._run(
-                        family,
-                        [
-                            "-t",
-                            "filter",
-                            "-I",
-                            chain,
-                            "1",
-                            "-m",
-                            "set",
-                            "--match-set",
-                            self.BLOCK_SETS[family],
-                            set_direction,
-                            "-j",
-                            "DROP",
-                        ],
-                    )
-
                 match_flag = "-s" if direction == "upload" else "-d"
                 discover_rule = [
                     "-t",
@@ -219,13 +170,12 @@ class Firewall:
             self._ensure_forward_jumps(family)
 
     def _ensure_forward_jumps(self, family: int) -> None:
-        """Keep accounting and blocking ahead of Tailscale's ACCEPT rules.
+        """Keep accounting ahead of Tailscale's ACCEPT rules.
 
         tailscaled can rebuild its ``ts-forward`` jump after this process has
         started.  Merely checking that our jumps exist is insufficient: an
-        earlier ACCEPT in ``ts-forward`` bypasses both accounting and access
-        blocks.  Inspect the ordered rules and only rewrite our two jumps when
-        they are no longer the first interface-specific handlers.
+        earlier ACCEPT in ``ts-forward`` bypasses accounting. Rewrite our two
+        jumps only when they are no longer the first handlers.
         """
         desired = [
             ["-o", self.interface, "-j", self.CHAINS["download"]],
@@ -257,6 +207,17 @@ class Firewall:
                 ["-t", "filter", "-I", "FORWARD", "1", *rule],
             )
 
+    def remove_legacy_blocks(self) -> None:
+        """Retire the old ipset filters after the independent nft table is ready."""
+        for family in (4, 6):
+            for direction, chain in self.CHAINS.items():
+                side = "src" if direction == "upload" else "dst"
+                rule = ["-m", "set", "--match-set", f"tsm_block{family}", side, "-j", "DROP"]
+                lines = self._run(family, ["-S", chain]).stdout.splitlines()
+                for line in lines:
+                    if line == " ".join(["-A", chain, *rule]):
+                        self._run(family, ["-D", chain, *rule])
+
     def counters(self) -> list[Counter]:
         counters: list[Counter] = []
         for (family, direction), set_name in self.SETS.items():
@@ -275,23 +236,3 @@ class Firewall:
                     )
                 )
         return counters
-
-    def set_blocked(self, addresses: set[str]) -> None:
-        grouped: dict[int, list[str]] = {4: [], 6: []}
-        for address in sorted(addresses):
-            try:
-                ip = ipaddress.ip_address(address)
-            except ValueError:
-                continue
-            if ip not in ipaddress.ip_network(self.TAILSCALE_RANGES[ip.version]):
-                continue
-            grouped[ip.version].append(str(ip))
-
-        for family in (4, 6):
-            staging = self.BLOCK_STAGING_SETS[family]
-            active = self.BLOCK_SETS[family]
-            self._run_ipset(["flush", staging])
-            for address in grouped[family]:
-                self._run_ipset(["add", staging, address, "-exist"])
-            self._run_ipset(["swap", staging, active])
-            self._run_ipset(["flush", staging])

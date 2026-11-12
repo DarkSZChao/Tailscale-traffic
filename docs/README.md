@@ -32,7 +32,7 @@ Tailscale Traffic Dashboard does not depend on paid APIs. It automatically disco
 - Kernel networking mode with a `tailscale0` interface;
 - Docker Engine and Docker Compose v2;
 - The host's Tailscale socket available at `/var/run/tailscale/tailscaled.sock`;
-- Conntrack traffic accounting enabled in the kernel;
+- Kernel support for nftables and conntrack traffic accounting;
 - An exit node used primarily for internet access. If the same node also advertises subnet routes, subnet traffic forwarded through `tailscale0` will also be counted.
 
 ## Deployment
@@ -68,23 +68,13 @@ docker compose down --remove-orphans
 docker compose up -d --build
 ```
 
-Compose starts two independent containers:
+Compose starts three services that share the project database:
 
-- `collector` runs continuously and handles traffic collection and quota enforcement;
-- `dashboard` serves the control panel and can be updated or restarted independently.
+- `collector` identifies devices and records traffic.
+- `dashboard` displays statistics and saves quota and block policies.
+- `blocker` restores active policies at startup and syncs every five seconds. Its dedicated nftables table only lists Tailscale addresses of confirmed shared devices.
 
-The dashboard container listens on port 8000 internally and is published on port **4656** on all host addresses.
-Use a firewall to restrict access to trusted sources:
-
-```text
-http://<your-VPS-Tailscale-IP>:4656
-```
-
-For example, use UFW to allow access only through the Tailscale interface:
-
-```bash
-sudo ufw allow in on tailscale0 to any port 4656 proto tcp
-```
+The dashboard binds to loopback and the configured Tailscale address on port **4656**. When moving hosts, update the Compose bind address, copy `data` and `config.yaml`, then run `docker compose up -d --build`.
 
 The first time you open the dashboard, you will be prompted to set a password. No username is required, and `.env` is no longer used.
 Only a secure password hash and hashed session tokens are stored in `traffic.db`. By default, login lasts for the current browser session. Select “Remember this device” to keep it for 30 days. The Settings page can revoke one device, sign out every device, or change the password; changing the password invalidates every other session.
@@ -105,8 +95,10 @@ If the page reports a collector error, check the following first:
 ```bash
 ls -l /var/run/tailscale/tailscaled.sock
 ip link show tailscale0
-docker compose logs collector --tail=100
+docker compose logs collector blocker --tail=100
 ```
+
+If `tailscaled` recreates its runtime directory and the collector loses its socket mount, run `docker compose up -d --force-recreate collector`.
 
 ## Data and upgrades
 
@@ -140,7 +132,7 @@ Update only the dashboard without interrupting collection:
 docker compose up -d --build dashboard
 ```
 
-Stopping the containers does not delete data, and the counting chains on the host remain in place. After the collector restarts, it continues calculating differences from the existing counters. If a host reboot resets the counters to zero, the application automatically continues accumulating from the new values. Changes to limits made in the dashboard are applied on the collector's next cycle, normally within about 10 seconds.
+Stopping the containers does not delete data, and the counting chains on the host remain in place. After the collector restarts, it continues calculating differences from the existing counters. If a host reboot resets the counters to zero, the application automatically continues accumulating from the new values. Policy changes are applied on the next `blocker` sync. After a host reboot, blocking resumes when the `blocker` container starts.
 
 The monthly traffic allowance, collection interval, website-record retention period, and reporting time zone are managed on the Settings page and stored in `./config.yaml`. The reporting time zone defaults to UTC and can be changed when calendar-day aggregation should follow another locale. Website-detail collection is always enabled.
 The collector automatically reloads updated settings. Authentication data remains exclusively in `traffic.db`. Audit logs use a separate SQLite WAL database at `data/log.db`; timestamps are stored in UTC and displayed in the browser's local time zone. The audit table retains at most 5,000 entries and can be searched, filtered by UTC date, refreshed, or cleared from the Logs page. On the first upgraded start, audit entries created by the earlier combined-database version are copied to `log.db` before the old table is removed from `traffic.db`. When upgrading from an older version, runtime settings stored in the database are automatically migrated to YAML, after which the old configuration table is removed.
@@ -182,14 +174,4 @@ Both connection-level domain mappings and DNS mappings use bounded in-memory cac
 
 ## Security notes
 
-Only the `collector` container uses host networking and the `NET_ADMIN` and `NET_RAW` capabilities. These permissions are required to read traffic, capture DNS and connection-handshake metadata, maintain counting rules, and enforce quota blocks.
-The `dashboard` uses a regular bridge network and cannot access the host firewall or Tailscale socket. No device is blocked unless a limit rule has been configured. The collector creates the following dedicated chains and sets:
-
-- `TSM_UPLOAD`
-- `TSM_DOWNLOAD`
-- `tsm_upload4` / `tsm_download4`
-- `tsm_upload6` / `tsm_download6`
-- `tsm_block4` / `tsm_block6`
-- `tsm_block4_next` / `tsm_block6_next` (used for atomic block-list updates)
-
-Build images only from trusted sources and trusted repository code.
+The `collector` uses host networking for accounting. The `blocker` uses `NET_ADMIN` to manage only `inet tsm_shared_block`, filtering forwarded traffic on `tailscale0`. The dashboard has no firewall access. Stopping the containers leaves installed blocks in place; when uninstalling, remove the project table with `sudo nft delete table inet tsm_shared_block`.

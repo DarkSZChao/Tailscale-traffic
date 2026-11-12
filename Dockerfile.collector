@@ -4,12 +4,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends conntrack ipset iptables \
+    && apt-get install -y --no-install-recommends conntrack ipset iptables nftables \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY app/__init__.py \
+     app/blocker.py \
      app/collector.py \
      app/collector_main.py \
      app/config.py \

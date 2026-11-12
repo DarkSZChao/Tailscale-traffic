@@ -1,5 +1,6 @@
 services:
   collector:
+    image: tailscale-traffic-collector:local
     build:
       context: .
       dockerfile: Dockerfile.collector
@@ -12,10 +13,33 @@ services:
     volumes:
       - ./data:/data
       - ./config.yaml:/config.yaml
-      # Mount the runtime directory rather than the socket inode itself.
-      # tailscaled replaces its socket during upgrades/restarts; a directory
-      # bind mount lets the collector see the replacement without recreation.
+      # Follow socket replacement within the directory. If tailscaled replaces
+      # the directory itself, recreate the collector to refresh its mount.
       - /run/tailscale:/var/run/tailscale:ro
+
+  blocker:
+    image: tailscale-traffic-collector:local
+    pull_policy: never
+    container_name: tailscale-traffic-blocker
+    command: ["python", "-m", "app.blocker"]
+    restart: unless-stopped
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /run:size=1m
+    mem_limit: 64m
+    volumes:
+      - ./data:/data
+      - ./config.yaml:/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.blocker", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
 
   dashboard:
     build:

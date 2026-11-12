@@ -239,7 +239,8 @@ class AuthenticationTests(unittest.TestCase):
                 json={"monthly_limit_bytes": 1},
             )
             self.assertEqual(policy.status_code, 200)
-            self.assertTrue(policy.json()["policy"]["blocked"])
+            self.assertTrue(policy.json()["policy"]["exceeded"])
+            self.assertFalse(policy.json()["policy"]["blocked"])
 
             policies = client.get("/api/policies")
             self.assertEqual(policies.status_code, 200)
@@ -293,9 +294,8 @@ class AuthenticationTests(unittest.TestCase):
                 json={"duration_seconds": 3600},
             )
             self.assertEqual(temporary_block.status_code, 200)
-            self.assertTrue(
-                temporary_block.json()["policy"]["manual_blocked"]
-            )
+            self.assertTrue(temporary_block.json()["policy"]["access_active"])
+            self.assertFalse(temporary_block.json()["policy"]["manual_blocked"])
             self.assertEqual(
                 temporary_block.json()["policy"]["block_mode"],
                 "temporary",

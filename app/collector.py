@@ -4,6 +4,7 @@ import logging
 from threading import Event
 from typing import TYPE_CHECKING
 
+from .blocker import table_exists
 from .config import AppConfig, TAILSCALE_INTERFACE
 from .database import Database
 from .firewall import Firewall
@@ -40,6 +41,7 @@ class Collector:
         self.last_error = ""
         self.last_success: str | None = None
         self._stop = Event()
+        self._legacy_blocks_removed = False
 
     def run_forever(self) -> None:
         self._running = True
@@ -60,9 +62,12 @@ class Collector:
         self._configure_runtime()
         peers = self.tailscale.peers()
         self.firewall.ensure()
+        if self._managed_runtime and not self._legacy_blocks_removed and table_exists():
+            self.firewall.remove_legacy_blocks()
+            self._legacy_blocks_removed = True
         counters = self.firewall.counters()
-        unresolved = self.database.unresolved_addresses(
-            counter.ip for counter in counters
+        unresolved = self.database.whois_candidates(
+            (counter.ip for counter in counters), {peer.ip for peer in peers}
         )
         for address in unresolved:
             try:
@@ -70,14 +75,10 @@ class Collector:
             except Exception as exc:
                 logger.warning("无法识别 Tailscale 地址 %s: %s", address, exc)
         self.database.sync_peers(peers)
-        # Apply blocks as soon as the latest peer/address mapping is known.
-        # Website collection can take several seconds on a busy conntrack
-        # table, so policy enforcement must not wait until after it finishes.
-        blocked_addresses = self.apply_policies()
         self.database.record_counters(counters)
         if self.website_collector:
             try:
-                self.website_collector.collect(blocked_addresses)
+                self.website_collector.collect(self.database.blocked_addresses())
             except Exception as exc:
                 self.database.update_website_status(True, str(exc))
                 logger.exception("采集网站流量失败")
@@ -107,11 +108,6 @@ class Collector:
             )
 
         self._runtime_config = config
-
-    def apply_policies(self) -> set[str]:
-        blocked_addresses = self.database.blocked_addresses()
-        self.firewall.set_blocked(blocked_addresses)
-        return blocked_addresses
 
     def _loop(self) -> None:
         while not self._stop.is_set():

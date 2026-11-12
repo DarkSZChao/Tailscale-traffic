@@ -32,7 +32,7 @@ Tailscale 流量控制面板不依赖付费 API。它在 VPS 本机的 Linux 转
 - 使用内核网络模式，存在 `tailscale0` 网卡；
 - Docker Engine 与 Docker Compose v2；
 - 宿主机的 Tailscale socket 路径为 `/var/run/tailscale/tailscaled.sock`；
-- 内核已启用 conntrack 流量计数；
+- 内核支持 nftables，并启用 conntrack 流量计数；
 - 当前出口节点主要用于互联网出口。如果还在同一节点配置了子网路由，经过 `tailscale0` 的子网转发流量也会计入。
 
 ## 部署
@@ -68,23 +68,13 @@ docker compose down --remove-orphans
 docker compose up -d --build
 ```
 
-Compose 会启动两个相互独立的容器：
+Compose 启动三个服务，共用项目数据库：
 
-- `collector` 长期运行，负责流量采集和限额封锁；
-- `dashboard` 提供控制面板，可以独立更新和重启。
+- `collector`：识别设备、采集流量并更新计数。
+- `dashboard`：显示统计，保存配额和封禁策略。
+- `blocker`：启动后从数据库恢复有效策略，每 5 秒同步一次；只把已确认的分享设备的 Tailscale IP 写入独立 nftables 表。
 
-dashboard 容器内部监听 8000，并映射到宿主机所有地址的 **4656** 端口。
-请使用防火墙限制为仅允许可信来源访问：
-
-```text
-http://你的VPS的Tailscale-IP:4656
-```
-
-例如使用 UFW 只允许从 Tailscale 接口访问：
-
-```bash
-sudo ufw allow in on tailscale0 to any port 4656 proto tcp
-```
+面板默认绑定本机回环地址和这台 VPS 的 Tailscale 地址，端口 **4656**。迁移时修改 Compose 里的 Tailscale 地址，带上 `data` 和 `config.yaml` 后运行 `docker compose up -d --build`。
 
 首次打开面板时会要求设置密码，不需要用户名，也不再使用 `.env`。
 密码和会话令牌都只以安全哈希保存在 `traffic.db` 中。默认登录只持续到
@@ -108,8 +98,10 @@ docker compose logs -f --tail=100
 ```bash
 ls -l /var/run/tailscale/tailscaled.sock
 ip link show tailscale0
-docker compose logs collector --tail=100
+docker compose logs collector blocker --tail=100
 ```
+
+若 `tailscaled` 重建运行目录后采集容器看不到 socket，执行 `docker compose up -d --force-recreate collector` 刷新挂载。
 
 ## 数据与升级
 
@@ -145,7 +137,7 @@ docker compose up -d --build
 docker compose up -d --build dashboard
 ```
 
-停止容器不会删除数据，宿主机里的计数链也会保留，采集器重新启动后会继续计算差值。宿主机重启导致计数器归零时，程序会自动从新值继续累计。面板修改限额后，采集器会在下一轮采集时执行，默认最多延迟约 10 秒。
+停止容器不会删除数据，宿主机里的计数链也会保留，采集器重新启动后会继续计算差值。宿主机重启导致计数器归零时，程序会自动从新值继续累计。面板修改策略后，`blocker` 会在下一次同步时应用。VPS 重启后，封禁随 `blocker` 容器启动恢复。
 
 月度总额度、采集间隔、网站记录保留天数和统计时区均在“设置”页面管理，
 并保存在 `./config.yaml`。统计时区默认为 UTC，需要按其他地区自然日聚合时
@@ -207,17 +199,4 @@ Tailscale 会隐藏外部共享节点的真实主机名。未设置设备备注�
 
 ## 安全说明
 
-只有 `collector` 容器使用宿主机网络并具有 `NET_ADMIN`、`NET_RAW`
-能力，这是读取流量、捕获 DNS/连接握手元数据、维护计数规则和执行限额封锁
-所必需的。
-`dashboard` 使用普通 bridge 网络，不接触宿主机防火墙和 Tailscale
-socket。没有配置限额规则时不会封锁任何设备。采集器创建以下自有链和集合：
-
-- `TSM_UPLOAD`
-- `TSM_DOWNLOAD`
-- `tsm_upload4` / `tsm_download4`
-- `tsm_upload6` / `tsm_download6`
-- `tsm_block4` / `tsm_block6`
-- `tsm_block4_next` / `tsm_block6_next`（用于原子更新封锁名单）
-
-请只使用可信镜像构建和可信仓库代码。
+`collector` 使用宿主机网络采集流量；`blocker` 只使用 `NET_ADMIN` 管理自己的 `inet tsm_shared_block` 表，仅过滤经过 `tailscale0` 的转发流量。面板不访问防火墙。停止容器时，已安装的封禁规则保留；彻底卸载项目时，可用 `sudo nft delete table inet tsm_shared_block` 删除该表。

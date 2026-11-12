@@ -23,6 +23,7 @@ class Peer:
     online: bool
     network_scope: str = "tailnet"
     expired: bool = False
+    sharee_node: bool = False
 
 
 class UnixHTTPConnection(http.client.HTTPConnection):
@@ -109,7 +110,7 @@ class TailscaleClient:
                 else f"device:{device_id}"
             )
             network_scope = (
-                "external" if bool(raw.get("ShareeNode")) else "tailnet"
+                "external" if raw.get("ShareeNode") is True else "tailnet"
             )
 
             for ip_text in raw.get("TailscaleIPs") or []:
@@ -131,6 +132,7 @@ class TailscaleClient:
                         online=bool(raw.get("Online")),
                         network_scope=network_scope,
                         expired=bool(raw.get("Expired")),
+                        sharee_node=raw.get("ShareeNode") is True,
                     )
                 )
         return result
@@ -151,9 +153,9 @@ class TailscaleClient:
     ) -> Peer:
         node = payload.get("Node") or {}
         user = payload.get("UserProfile") or {}
+        hostinfo = node.get("Hostinfo") or {}
         user_id = str(user.get("ID") or "")
         node_id = str(node.get("StableID") or node.get("ID") or ip)
-        hostinfo = node.get("Hostinfo") or {}
         login_name = str(user.get("LoginName") or "")
         device_name = TailscaleClient._device_name(
             hostinfo.get("Hostname"),
@@ -182,4 +184,5 @@ class TailscaleClient:
             online=True,
             network_scope="external",
             expired=bool(node.get("Expired")),
+            sharee_node=hostinfo.get("ShareeNode") is True,
         )
